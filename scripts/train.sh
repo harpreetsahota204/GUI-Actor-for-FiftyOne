@@ -1,6 +1,6 @@
 #!/bin/bash
 # model_type: qwen2vl or qwen25vl
-model_type="qwen2vl"
+model_type="qwen25vl"
 llm_model="./checkpoints/${model_type}_warmup"
 output_dir="./checkpoints/${model_type}_sft"
 

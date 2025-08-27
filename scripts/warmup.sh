@@ -1,7 +1,7 @@
 #!/bin/bash
 # model_type: qwen2vl or qwen25vl
 model_type="qwen25vl"
-llm_model="Qwen/Qwen2.5-VL-3B-Instruct"
+llm_model="microsoft/GUI-Actor-3B-Qwen2.5-VL"
 output_dir="./checkpoints/${model_type}_warmup"
 
 # === Training Command ===
