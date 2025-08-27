@@ -1,14 +1,8 @@
 import torch
-import json
-import re
-import os
 from qwen_vl_utils import process_vision_info
 from transformers import (
-    Qwen2VLForConditionalGeneration,
     LogitsProcessor,
     LogitsProcessorList,
-    AutoModelForCausalLM,
-    AutoTokenizer
 )
 from gui_actor.constants import (
     DEFAULT_POINTER_END_TOKEN,
