@@ -104,7 +104,7 @@ class VisionHead_MultiPatch(nn.Module):
             loss = F.kl_div(pred_log_probs, target_dist, reduction='batchmean')
 
         if do_single_patch and (labels is not None):
-            loss = F.cross_entropy(attn_scores, labels)
+            loss = F.cross_entropy(attn_weights, labels)
 
         return attn_weights, loss
 
