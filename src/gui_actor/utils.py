@@ -22,54 +22,6 @@ def dump_args_to_json(model_config, data_processor, model_args, data_args, train
                 "training_args": {k: v for k, v in training_args.__dict__.items() if is_json_serializable(v)},
             }, f, indent=4)
 
-def draw_point(image: Image.Image, point: list, color=None):
-    if isinstance(color, str):
-        try:
-            color = ImageColor.getrgb(color)
-            color = color + (128,)  
-        except ValueError:
-            color = (255, 0, 0, 128)  
-    else:
-        color = (255, 0, 0, 128)  
-
-    overlay = Image.new('RGBA', image.size, (255, 255, 255, 0))
-    overlay_draw = ImageDraw.Draw(overlay)
-    radius = 14
-    x, y = point
-
-    overlay_draw.rectangle(
-        [x - radius, y - radius, x + radius, y + radius],
-        fill=color
-    )
-    
-    center_radius = radius * 0.1
-    overlay_draw.ellipse(
-        [(x - center_radius, y - center_radius), 
-         (x + center_radius, y + center_radius)],
-        fill=(0, 255, 0, 255)
-    )
-
-    image = image.convert('RGBA')
-    combined = Image.alpha_composite(image, overlay)
-
-    return combined.convert('RGB')
-
-def draw_bbox(image: Image.Image, bbox: list, color=None):
-    """bbox is in the format of [x1, y1, x2, y2]"""
-    if isinstance(color, str):
-        try:
-            color = ImageColor.getrgb(color)
-            color = color + (128,)  
-        except ValueError:
-            color = (255, 0, 0, 128)  
-    else:
-        color = (255, 0, 0, 128)
-    
-    overlay = Image.new('RGBA', image.size, (255, 255, 255, 0))
-    overlay_draw = ImageDraw.Draw(overlay)
-    overlay_draw.rectangle(bbox, fill=color)
-    return Image.alpha_composite(image, overlay).convert('RGB')
-
 def do_boxes_overlap(box1, box2):
     """
     Check if two boxes overlap.
