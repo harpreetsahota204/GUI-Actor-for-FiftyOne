@@ -7,13 +7,24 @@ import torch
 from qwen_vl_utils import process_vision_info
 from torch.utils.data import Dataset
 
-from constants import (
-    IGNORE_INDEX,  # Token ID to ignore in loss calculation
-    DEFAULT_POINTER_START_TOKEN,  # Special token marking start of pointer sequence
-    DEFAULT_POINTER_PAD_TOKEN,  # Special token for padding pointer sequences
-    DEFAULT_POINTER_END_TOKEN,  # Special token marking end of pointer sequence
-    ACTION_PATTENS_XY  # Regex patterns for extracting coordinate pairs
-)
+try:
+    # Try absolute import first (when used as installed package)
+    from gui_actor.constants import (
+        IGNORE_INDEX,  # Token ID to ignore in loss calculation
+        DEFAULT_POINTER_START_TOKEN,  # Special token marking start of pointer sequence
+        DEFAULT_POINTER_PAD_TOKEN,  # Special token for padding pointer sequences
+        DEFAULT_POINTER_END_TOKEN,  # Special token marking end of pointer sequence
+        ACTION_PATTENS_XY  # Regex patterns for extracting coordinate pairs
+    )
+except ImportError:
+    # Fall back to relative import (when running locally)
+    from .constants import (
+        IGNORE_INDEX,
+        DEFAULT_POINTER_START_TOKEN,
+        DEFAULT_POINTER_PAD_TOKEN,
+        DEFAULT_POINTER_END_TOKEN,
+        ACTION_PATTENS_XY
+    )
 
 def reformat_coordinates(text):
     """
