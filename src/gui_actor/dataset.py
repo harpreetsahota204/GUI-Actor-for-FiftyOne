@@ -89,7 +89,7 @@ def reformat_coordinates(text):
     
     return text, coordinates
 
-def get_token_index(image_processor, image, point_x, point_y):
+def get_token_index(image_processor, image, point_x, point_y, image_grid_thw=None):
     """
     Convert a point coordinate to its corresponding visual token index.
     
@@ -98,6 +98,7 @@ def get_token_index(image_processor, image, point_x, point_y):
         image: List containing single PIL image
         point_x: X coordinate normalized to [0,1]
         point_y: Y coordinate normalized to [0,1]
+        image_grid_thw: Optional tuple of (tiles, height, width) from processor output
         
     Returns:
         int: Index of the visual token containing the point
@@ -108,22 +109,41 @@ def get_token_index(image_processor, image, point_x, point_y):
     if len(image) != 1:
         raise ValueError(f"Expected 1 image, got {len(image)}")
     
-    # Convert normalized coordinates to pixel coordinates
+    # Get image dimensions
     image = image[0]
     w, h = image.size
-    px, py = w * point_x, h * point_y
     
-    # Calculate token grid position
-    merge_patch_size = image_processor.patch_size * image_processor.merge_size
-    x_index = math.floor(px / merge_patch_size)
-    y_index = math.floor(py / merge_patch_size)
-    
-    # Convert 2D grid position to flattened index
-    visual_token_index = y_index * (w // merge_patch_size) + x_index
+    # If image_grid_thw is provided, use it to determine the actual grid dimensions
+    if image_grid_thw is not None:
+        # image_grid_thw is (tiles, height_patches, width_patches)
+        tiles, h_patches, w_patches = image_grid_thw
+        
+        # Calculate patches per dimension after merging
+        merge_size = image_processor.merge_size
+        h_merged = h_patches // merge_size
+        w_merged = w_patches // merge_size
+        
+        # Convert normalized coordinates to grid indices
+        x_index = min(int(point_x * w_merged), w_merged - 1)
+        y_index = min(int(point_y * h_merged), h_merged - 1)
+        
+        # Convert 2D grid position to flattened index
+        visual_token_index = y_index * w_merged + x_index
+    else:
+        # Fallback to original calculation
+        px, py = w * point_x, h * point_y
+        
+        # Calculate token grid position
+        merge_patch_size = image_processor.patch_size * image_processor.merge_size
+        x_index = math.floor(px / merge_patch_size)
+        y_index = math.floor(py / merge_patch_size)
+        
+        # Convert 2D grid position to flattened index
+        visual_token_index = y_index * (w // merge_patch_size) + x_index
 
     return visual_token_index
 
-def get_multi_patch_labels(image_processor, image, bbox_gt):
+def get_multi_patch_labels(image_processor, image, bbox_gt, image_grid_thw=None):
     """
     Generate binary mask indicating which visual tokens overlap with a bounding box.
     
@@ -154,19 +174,37 @@ def get_multi_patch_labels(image_processor, image, bbox_gt):
     y_max = min(h, y_max)
 
     # Calculate grid dimensions
-    merge_patch_size = image_processor.patch_size * image_processor.merge_size
-    assert w % merge_patch_size == 0 and h % merge_patch_size == 0, f"Image size {w}x{h} is not divisible by merge_patch_size {merge_patch_size}"
-    grid_h, grid_w = h // merge_patch_size, w // merge_patch_size
+    if image_grid_thw is not None:
+        # Use the actual grid dimensions from processor
+        tiles, h_patches, w_patches = image_grid_thw
+        merge_size = image_processor.merge_size
+        grid_h = h_patches // merge_size
+        grid_w = w_patches // merge_size
+        merge_patch_size = None  # Will calculate differently
+    else:
+        # Fallback to original calculation
+        merge_patch_size = image_processor.patch_size * image_processor.merge_size
+        assert w % merge_patch_size == 0 and h % merge_patch_size == 0, f"Image size {w}x{h} is not divisible by merge_patch_size {merge_patch_size}"
+        grid_h, grid_w = h // merge_patch_size, w // merge_patch_size
 
     # Create binary mask for overlapping patches
     binary_mask = torch.zeros(grid_h * grid_w)
     for y_idx in range(grid_h):
         for x_idx in range(grid_w):
             # Get patch boundaries
-            patch_x_min = x_idx * merge_patch_size
-            patch_y_min = y_idx * merge_patch_size
-            patch_x_max = patch_x_min + merge_patch_size
-            patch_y_max = patch_y_min + merge_patch_size
+            if image_grid_thw is not None:
+                # Calculate patch size based on actual grid
+                patch_width = w / grid_w
+                patch_height = h / grid_h
+                patch_x_min = x_idx * patch_width
+                patch_y_min = y_idx * patch_height
+                patch_x_max = patch_x_min + patch_width
+                patch_y_max = patch_y_min + patch_height
+            else:
+                patch_x_min = x_idx * merge_patch_size
+                patch_y_min = y_idx * merge_patch_size
+                patch_x_max = patch_x_min + merge_patch_size
+                patch_y_max = patch_y_min + merge_patch_size
             
             # Check for overlap with bbox
             if not (patch_x_max <= x_min or patch_x_min >= x_max or 
@@ -270,13 +308,19 @@ class GUIActorFiftyOneCollator:
             multi_patch_labels = []
             
             if coordinates and image_inputs:
+                # Get image grid dimensions from processor output
+                image_grid_thw = inputs.get('image_grid_thw')
+                if image_grid_thw is not None:
+                    image_grid_thw = tuple(image_grid_thw[0].tolist())
+                
                 for i, coord in enumerate(coordinates):
                     x, y = coord
                     # Get token index for coordinate
                     visual_idx = get_token_index(
                         self.processor.image_processor,
                         image_inputs,
-                        x, y
+                        x, y,
+                        image_grid_thw=image_grid_thw
                     )
                     visual_token_indices.append(visual_idx)
                     
@@ -288,16 +332,33 @@ class GUIActorFiftyOneCollator:
                         patch_mask = get_multi_patch_labels(
                             self.processor.image_processor,
                             image_inputs,
-                            bbox_gt
+                            bbox_gt,
+                            image_grid_thw=image_grid_thw
                         )
                         multi_patch_labels.append(patch_mask)
                 elif point_gt:
                     # For single point, mark single patch
-                    n_visual = (inputs['image_grid_thw'][0][0] * 
-                              inputs['image_grid_thw'][0][1] // 
-                              (self.processor.image_processor.merge_size ** 2))
+                    # Calculate the correct number of visual tokens
+                    tiles = inputs['image_grid_thw'][0][0]
+                    h_patches = inputs['image_grid_thw'][0][1]
+                    w_patches = inputs['image_grid_thw'][0][2]
+                    merge_size = self.processor.image_processor.merge_size
+                    
+                    # Number of visual tokens = (h_patches // merge_size) * (w_patches // merge_size)
+                    h_merged = h_patches // merge_size
+                    w_merged = w_patches // merge_size
+                    n_visual = h_merged * w_merged
+                    
                     patch_mask = torch.zeros(n_visual)
-                    patch_mask[visual_token_indices[0]] = 1.0
+                    
+                    # Validate and clip the visual token index to valid range
+                    if visual_token_indices:
+                        token_idx = visual_token_indices[0]
+                        if token_idx >= n_visual:
+                            print(f"Warning: Visual token index {token_idx} out of bounds for n_visual={n_visual}. Clipping to valid range.")
+                            token_idx = min(token_idx, n_visual - 1)
+                        patch_mask[token_idx] = 1.0
+                    
                     multi_patch_labels.append(patch_mask)
             
             # Create language modeling labels
