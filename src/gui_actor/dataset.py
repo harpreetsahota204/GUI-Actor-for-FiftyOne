@@ -17,77 +17,64 @@ from gui_actor.constants import (
 
 def reformat_coordinates(text):
     """
-    Process text to extract and standardize coordinate references.
+    Process text to extract and standardize coordinate references, replacing them with special tokens.
     
     This function:
-    1. Finds all coordinate pairs in the text using regex patterns
-    2. Replaces coordinates with special pointer tokens
-    3. Normalizes coordinates to [0,1] range
+    1. Finds all coordinate patterns in the text (both single points and coordinate pairs)
+    2. Extracts and adjusts coordinates to be within valid bounds
+    3. Replaces coordinate patterns with special pointer tokens
     
     Args:
         text (str): Input text containing coordinate references
         
     Returns:
-        tuple: (processed_text, coordinates_list) where:
-            - processed_text has coordinates replaced with special tokens
-            - coordinates_list contains extracted (x,y) pairs normalized to [0,1]
+        tuple: (processed_text, coordinates) where:
+            - processed_text (str): Text with coordinates replaced by special tokens
+            - coordinates (list): List of extracted (x,y) coordinate tuples
     """
-    epsilon = 0.001  # Small value to avoid exact 0 or 1 coordinates
+    # Small value to ensure coordinates stay within [0,1] bounds
+    epsilon = 0.001
+    
     def adjust_coord(c):
-        """
-        Adjust coordinate value to avoid exact 0 or 1.
-        
-        Args:
-            c (float): Raw coordinate value
-            
-        Returns:
-            float: Adjusted coordinate slightly offset from 0 or 1 if needed
-        """
+        """Adjust coordinate to avoid exact 0 or 1 values for numerical stability"""
         if abs(c) < epsilon:
-            return epsilon
+            return epsilon  # Avoid exact 0
         elif abs(c - 1) < epsilon:
-            return 1 - epsilon
+            return 1 - epsilon  # Avoid exact 1
         return c
 
-    # Store all regex matches with their positions
+    # Store all coordinate pattern matches with their positions for ordered processing
     all_matches = []
     for pattern in ACTION_PATTENS_XY:
         matches = list(re.finditer(pattern, text))
         for match in matches:
             all_matches.append((match.start(), match.groups()))
-        
-        # Replace coordinates with special token sequences
-        if pattern == ACTION_PATTENS_XY[0]:
-            # Single coordinate pair
-            target_text = f"{DEFAULT_POINTER_START_TOKEN}{DEFAULT_POINTER_PAD_TOKEN}{DEFAULT_POINTER_END_TOKEN}"
-        else:
-            # Double coordinate pair
-            target_text = f"{DEFAULT_POINTER_START_TOKEN}{DEFAULT_POINTER_PAD_TOKEN}{DEFAULT_POINTER_END_TOKEN}, {DEFAULT_POINTER_START_TOKEN}{DEFAULT_POINTER_PAD_TOKEN}{DEFAULT_POINTER_END_TOKEN}"
-        text = re.sub(
-            pattern,
-            target_text,
-            text
-        )
     
-    # Process matches in order of appearance
-    coordinates = []
+    # Sort matches by position to maintain order
     all_matches.sort(key=lambda x: x[0])
+    
+    # Extract and process coordinates from matches
+    coordinates = []
     for _, groups in all_matches:
-        if len(groups) == 2:
-            # Single coordinate pair
-            x_str, y_str = groups
-            x = adjust_coord(ast.literal_eval(x_str))
-            y = adjust_coord(ast.literal_eval(y_str))
+        if len(groups) == 2:  # Single point pattern (x,y)
+            x = adjust_coord(float(groups[0]))
+            y = adjust_coord(float(groups[1]))
             coordinates.append((x, y))
-        elif len(groups) == 4:
-            # Two coordinate pairs
-            x1_str, y1_str, x2_str, y2_str = groups
-            x1 = adjust_coord(ast.literal_eval(x1_str))
-            y1 = adjust_coord(ast.literal_eval(y1_str))
-            x2 = adjust_coord(ast.literal_eval(x2_str))
-            y2 = adjust_coord(ast.literal_eval(y2_str))
+        elif len(groups) == 4:  # Two point pattern (x1,y1,x2,y2)
+            x1 = adjust_coord(float(groups[0]))
+            y1 = adjust_coord(float(groups[1]))
+            x2 = adjust_coord(float(groups[2]))
+            y2 = adjust_coord(float(groups[3]))
             coordinates.append((x1, y1))
             coordinates.append((x2, y2))
+    
+    # Replace coordinate patterns with special pointer token sequences
+    for pattern in ACTION_PATTENS_XY:
+        if pattern == ACTION_PATTENS_XY[0]:  # Single point pattern
+            target_text = f"{DEFAULT_POINTER_START_TOKEN}{DEFAULT_POINTER_PAD_TOKEN}{DEFAULT_POINTER_END_TOKEN}"
+        else:  # Two point pattern
+            target_text = f"{DEFAULT_POINTER_START_TOKEN}{DEFAULT_POINTER_PAD_TOKEN}{DEFAULT_POINTER_END_TOKEN}, {DEFAULT_POINTER_START_TOKEN}{DEFAULT_POINTER_PAD_TOKEN}{DEFAULT_POINTER_END_TOKEN}"
+        text = re.sub(pattern, target_text, text)
     
     return text, coordinates
 
