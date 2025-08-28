@@ -143,21 +143,21 @@ class DataGetter(GetItem):
 
         # Extract message_payload from keypoints (if they exist)
         keypoints = d.get("keypoints")
-        if keypoints is not None:
-            for keypoint in keypoints.keypoints:
-                message_payloads.append(keypoint.message_payload)
+        if keypoints is not None and hasattr(keypoints, 'message_payload'):
+            # If keypoints is a single object with message_payload
+            message_payloads.append(keypoints.message_payload)
 
         # Extract message_payload from detections (if they exist)
         detections = d.get("detections")
-        if detections is not None:
-            for detection in detections.detections:
-                message_payloads.append(detection.message_payload)
+        if detections is not None and hasattr(detections, 'message_payload'):
+            # detections is a single Detection object, not a Detections collection
+            message_payloads.append(detections.message_payload)
 
         return {
             "filepath": d["filepath"],
             "message_payloads": message_payloads,
         }
-
+    
 def create_torch_dataset(dataset_name):
     """
     Create PyTorch datasets from a FiftyOne dataset.
