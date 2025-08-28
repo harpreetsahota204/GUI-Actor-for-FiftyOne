@@ -226,14 +226,14 @@ class GUIActorFiftyOneCollator:
         Process a batch of samples from the dataset.
         
         Args:
-            batch: List of samples, each containing message_payloads and filepath
+            batch: List of samples, each containing message_payload and filepath
             
         Returns:
             dict: Processed batch with input_ids, labels, and visual features matching trainer expectations
         """
         processed_samples = []
         for item in batch:
-            messages = item['message_payloads'][0]  # Already has filepath
+            messages = item['message_payload'][0]  # Already has filepath
             
             # Get ground truth coordinates/bbox from assistant message
             assistant_msg = messages[-1]
