@@ -20,8 +20,10 @@ from accelerate import Accelerator, DataLoaderConfiguration
 from accelerate.utils import GradientAccumulationPlugin, InitProcessGroupKwargs
 from torch.utils.data import DataLoader, RandomSampler
 from transformers import Trainer
+
+from transformers.pytorch_utils import ALL_LAYERNORM_LAYERS
+
 from transformers.trainer import (
-    ALL_LAYERNORM_LAYERS,
     get_parameter_names,
     has_length,
     is_accelerate_available,
