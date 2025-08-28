@@ -234,41 +234,23 @@ class GUIActorFiftyOneCollator:
         """
         processed_samples = []
         for item in batch:
-            messages = item['message_payloads'][0]  # Get first annotation
-            filepath = item['filepath']
-            
-            # Load and convert image
-            image = Image.open(filepath).convert('RGB')
+            messages = item['message_payloads'][0]  # Already has filepath
             
             # Get ground truth coordinates/bbox from assistant message
             assistant_msg = messages[-1]
             point_gt = assistant_msg.get('point_gt')
             bbox_gt = assistant_msg.get('bbox_gt')
             
-            # Replace filepath references with actual image
-            messages_with_image = []
-            for msg in messages:
-                if msg['role'] == 'user':
-                    content = []
-                    for c in msg['content']:
-                        if c['type'] == 'image':
-                            content.append({'type': 'image', 'image': image})
-                        else:
-                            content.append(c)
-                    messages_with_image.append({'role': msg['role'], 'content': content})
-                else:
-                    messages_with_image.append(msg)
+            # Process images directly from messages with filepath
+            image_inputs, _ = process_vision_info(messages)
             
-            # Process images to get resized versions
-            image_inputs, _ = process_vision_info(messages_with_image)
-            
-            # Apply chat template to format conversation
+            # Apply chat template
             text = self.processor.apply_chat_template(
-                messages_with_image,
+                messages,
                 tokenize=False,
                 add_generation_prompt=False
             )
-            
+
             # Extract and standardize coordinates
             text, coordinates = reformat_coordinates(text)
             
@@ -276,7 +258,7 @@ class GUIActorFiftyOneCollator:
             inputs = self.processor(
                 text=[text],
                 images=image_inputs if image_inputs else None,
-                return_tensors="pt"
+                return_tensors="pt",
             )
             
             # Compute visual token indices and patch labels
