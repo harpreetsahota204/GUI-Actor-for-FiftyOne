@@ -31,8 +31,8 @@ ADDITIONAL_SPECIAL_TOKENS = [
 
 # Action Patterns to be replaced with special tokens
 ACTION_PATTENS_XY = [
-    r"x=([0-9.]+), y=([0-9.]+)",
-    r"from_coord=\[([0-9.]+), ([0-9.]+)\], to_coord=\[([0-9.]+), ([0-9.]+)\]",
-]
+        r"x=([-0-9.]+),\s*y=([-0-9.]+)",
+        r"from_coord=\[([-0-9.]+),\s*([-0-9.]+)\]\s+to_coord=\[([-0-9.]+),\s*([-0-9.]+)\]",
+    ]
 
 until = ["<|diff_marker|>"]
