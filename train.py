@@ -55,7 +55,7 @@ def train_gui_actor_on_fiftyone(
         p.requires_grad = True
         
     rank0_print(f"Unfreezing last {num_unfrozen_layers} transformer layers...")
-    for p in model.model.layers[-num_unfrozen_layers:].parameters():
+    for p in model.language_model.layers[-num_unfrozen_layers:].parameters():
         p.requires_grad = True
     
     # Enable gradient checkpointing
@@ -82,7 +82,7 @@ def train_gui_actor_on_fiftyone(
         dataloader_num_workers=4,
         optim="adamw_torch",
         lr_scheduler_type="cosine",
-        evaluation_strategy="steps" if val_dataset else "no",
+        eval_strategy="steps" if val_dataset else "no",
         eval_steps=save_steps if val_dataset else None,
         load_best_model_at_end=True if val_dataset else False,
         report_to="tensorboard",  # Add tensorboard logging
