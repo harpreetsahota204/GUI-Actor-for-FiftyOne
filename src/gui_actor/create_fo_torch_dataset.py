@@ -141,32 +141,48 @@ class DataGetter(GetItem):
 
     def __call__(self, d):
         message_payloads = []
-
-        # IMPORTANT: When using to_patches(), each patch contains EITHER a keypoint OR a detection, never both
-        # - Keypoint patches: keypoints field has data, detections is None
-        # - Detection patches: detections field has data, keypoints is None
         
-        # Extract message_payload from keypoints (if this is a keypoint patch)
+        # Extract message_payload from all keypoints in the sample
         keypoints = d.get("keypoints")
-        if keypoints is not None:
-            # This is a keypoint patch - get message_payload from the single keypoint object
-            msg_payload = getattr(keypoints, 'message_payload', None)
-            if msg_payload is not None:
-                message_payloads.append(msg_payload)
-
-        # Extract message_payload from detections (if this is a detection patch)
+        if keypoints is not None and hasattr(keypoints, 'keypoints'):
+            for keypoint in keypoints.keypoints:
+                if hasattr(keypoint, 'message_payload') and keypoint.message_payload is not None:
+                    message_payloads.append(keypoint.message_payload)
+        
+        # Extract message_payload from all detections in the sample
         detections = d.get("detections")
-        if detections is not None:
-            # This is a detection patch - get message_payload from the single detection object
-            msg_payload = getattr(detections, 'message_payload', None)
-            if msg_payload is not None:
-                message_payloads.append(msg_payload)
-
-        # Note: message_payloads will have exactly 0 or 1 items (never both keypoint and detection)
+        if detections is not None and hasattr(detections, 'detections'):
+            for detection in detections.detections:
+                if hasattr(detection, 'message_payload') and detection.message_payload is not None:
+                    message_payloads.append(detection.message_payload)
+        
         return {
-            "filepath": d["filepath"],
+            "filepath": d.get("filepath", ""),
             "message_payload": message_payloads,
         }
+
+
+class FlattenedDataset:
+    """
+    Flattens a FiftyOne torch dataset so each item is a single message_payload
+    with its associated filepath.
+    """
+    def __init__(self, fiftyone_torch_dataset):
+        self.items = []
+        for sample in fiftyone_torch_dataset:
+            filepath = sample["filepath"]
+            for message_payload in sample["message_payload"]:
+                if message_payload:  # Only add non-empty payloads
+                    self.items.append({
+                        "filepath": filepath,
+                        "message_payload": message_payload
+                    })
+    
+    def __len__(self):
+        return len(self.items)
+    
+    def __getitem__(self, idx):
+        return self.items[idx]
     
 def create_torch_dataset(dataset_name):
     """
@@ -176,7 +192,7 @@ def create_torch_dataset(dataset_name):
         dataset_name: Name of the FiftyOne dataset to process
     
     Returns:
-        train_torch_dataset, val_torch_dataset: PyTorch datasets for training and validation
+        train_dataset, val_dataset: Flattened PyTorch datasets for training and validation
     """
     print(f"Loading FiftyOne dataset: {dataset_name}")
     dataset = fo.load_dataset(dataset_name)
@@ -184,42 +200,29 @@ def create_torch_dataset(dataset_name):
     print("Adding message payloads to dataset...")
     add_message_payload_to_dataset(dataset)
     
-    print("Creating combined patches dataset...")
-    # Create a new dataset to store combined patches
-    patches_name = f"{dataset_name}_patches"
-
-    combined_dataset = fo.Dataset(name=patches_name, overwrite=True)
-    
-    # Get patches from both fields
-    print("Extracting bounding box patches...")
-    bb_patches = dataset.to_patches("detections")
-    print("Extracting keypoint patches...")
-    kp_patches = dataset.to_patches("keypoints")
-    
-    # Add detection patches to the new dataset
-    print("Adding patches to combined dataset...")
-    for patch in bb_patches:
-        combined_dataset.add_sample(patch.copy())
-    
-    # Add keypoint patches to the new dataset
-    for patch in kp_patches:
-        combined_dataset.add_sample(patch.copy())
-    
     print("Performing random split...")
-    
-    four.random_split(combined_dataset, {"train": 0.8, "val": 0.2})
+    # Split the dataset into train and validation
+    four.random_split(dataset, {"train": 0.8, "val": 0.2})
     
     print("Creating PyTorch datasets...")
-    train_view = combined_dataset.match_tags("train")
-    val_view = combined_dataset.match_tags("val")
+    # Create views for train and validation
+    train_view = dataset.match_tags("train")
+    val_view = dataset.match_tags("val")
     
+    # Create torch datasets using DataGetter
     train_torch_dataset = train_view.to_torch(DataGetter())
-
     val_torch_dataset = val_view.to_torch(DataGetter())
     
-    print(f"Created PyTorch datasets: train={len(train_torch_dataset)}, val={len(val_torch_dataset)}")
-
-    return train_torch_dataset, val_torch_dataset
+    print(f"Intermediate datasets: train={len(train_torch_dataset)}, val={len(val_torch_dataset)}")
+    
+    # Flatten the datasets so each item is a single message_payload
+    print("Flattening datasets...")
+    train_dataset = FlattenedDataset(train_torch_dataset)
+    val_dataset = FlattenedDataset(val_torch_dataset)
+    
+    print(f"Final flattened datasets: train={len(train_dataset)}, val={len(val_dataset)}")
+    
+    return train_dataset, val_dataset
 
 
 def main():
