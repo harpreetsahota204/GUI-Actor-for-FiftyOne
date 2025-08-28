@@ -1,3 +1,14 @@
+"""
+Custom trainer class extending Hugging Face's Trainer for GUI interaction tasks.
+
+This module provides specialized training functionality for GUI interaction models,
+including:
+- Custom EOS token handling
+- Accelerator setup
+- Optimizers with different learning rates for different parameter groups
+- Length-based batch grouping
+"""
+
 from datetime import timedelta
 from functools import wraps
 from typing import Optional
@@ -26,6 +37,7 @@ if is_datasets_available():
 
 
 def rank0_print(*args):
+    """Print message only from rank 0 process in distributed training."""
     if dist.is_initialized():
         if dist.get_rank() == 0:
             print(f"Rank {dist.get_rank()}: ", *args)
@@ -34,6 +46,12 @@ def rank0_print(*args):
 
 
 def maybe_zero_3(param, ignore_status=False, name=None):
+    """
+    Handle DeepSpeed ZeRO-3 parameters.
+    
+    Gathers parameters across devices if using ZeRO-3 sharding.
+    Returns CPU copy of the parameter.
+    """
     from deepspeed import zero
     from deepspeed.runtime.zero.partition_parameters import ZeroParamStatus
 
@@ -48,13 +66,22 @@ def maybe_zero_3(param, ignore_status=False, name=None):
 
 
 def get_mm_adapter_state_maybe_zero_3(named_params, keys_to_match):
+    """
+    Get multimodal adapter parameters, handling ZeRO-3 if needed.
+    
+    Extracts parameters matching given keys and moves them to CPU.
+    """
     to_return = {k: t for k, t in named_params if any(key_match in k for key_match in keys_to_match)}
     to_return = {k: maybe_zero_3(v, ignore_status=True).cpu() for k, v in to_return.items()}
     return to_return
 
 
 def safe_save_model_for_hf_trainer(trainer: transformers.Trainer, output_dir: str):
-    """Collects the state dict and dump to disk."""
+    """
+    Safely save model accounting for distributed training.
+    
+    Ensures all processes are synced before saving and handles DeepSpeed case.
+    """
     trainer.accelerator.wait_for_everyone()
     torch.cuda.synchronize()
 
@@ -70,16 +97,27 @@ def safe_save_model_for_hf_trainer(trainer: transformers.Trainer, output_dir: st
 
 
 class AGUVISTrainer(Trainer):
+    """
+    Custom trainer for GUI interaction tasks extending HF Trainer.
+    
+    Adds functionality for:
+    - Custom EOS token handling during saving
+    - Specialized accelerator setup
+    - Different learning rates for different parameter groups
+    """
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
+        # Store original save methods
         original_save = self._save
         original_save_model = self.save_model
 
         def modify_eos_token(func):
+            """Decorator to temporarily modify EOS token during saving."""
             @wraps(func)
             def wrapper(*args, **kwargs):
+                # Store original token settings
                 tokenizer = self.processing_class.tokenizer
                 old_config_id = self.model.config.eos_token_id
                 old_eos_token = tokenizer.eos_token
@@ -88,6 +126,7 @@ class AGUVISTrainer(Trainer):
                 )
 
                 try:
+                    # Set custom EOS token
                     new_eos_token_id = tokenizer.convert_tokens_to_ids("<|diff_marker|>")
                     self.model.config.eos_token_id = [new_eos_token_id]
                     tokenizer.eos_token = "<|diff_marker|>"
@@ -101,6 +140,7 @@ class AGUVISTrainer(Trainer):
                     result = func(*args, **kwargs)
                     return result
                 finally:
+                    # Restore original token settings
                     self.model.config.eos_token_id = old_config_id
                     tokenizer.eos_token = old_eos_token
                     if hasattr(self.model, "generation_config") and old_generation_config_eos_token_id is not None:
@@ -113,17 +153,25 @@ class AGUVISTrainer(Trainer):
 
             return wrapper
 
+        # Apply EOS token modification to save methods
         self._save = modify_eos_token(original_save)
         self.save_model = modify_eos_token(original_save_model)
 
     def create_accelerator_and_postprocess(self):
+        """
+        Create and configure accelerator for distributed training.
+        
+        Sets up gradient accumulation, process group timeouts, and FSDP/DeepSpeed if enabled.
+        """
+        # Configure gradient accumulation
         grad_acc_kwargs = {"num_steps": self.args.gradient_accumulation_steps}
         grad_acc_kwargs["sync_with_dataloader"] = False
         gradient_accumulation_plugin = GradientAccumulationPlugin(**grad_acc_kwargs)
 
+        # Set long timeout for process group
         accelerator_kwargs = InitProcessGroupKwargs(timeout=timedelta(weeks=52))
 
-        # create accelerator object
+        # Create accelerator with dataloader config
         dispatch_batches = getattr(self.args, "dispatch_batches", None)
         split_batches = getattr(self.args, "split_batches", None)
         self.dataloader_config = DataLoaderConfiguration(
@@ -136,14 +184,13 @@ class AGUVISTrainer(Trainer):
             gradient_accumulation_plugin=gradient_accumulation_plugin,
             kwargs_handlers=[accelerator_kwargs],
         )
-        # some Trainer classes need to use `gather` instead of `gather_for_metrics`, thus we store a flag
         self.gather_function = self.accelerator.gather_for_metrics
 
-        # deepspeed and accelerate flags covering both trainer args and accelerate launcher
+        # Set distributed training flags
         self.is_deepspeed_enabled = getattr(self.accelerator.state, "deepspeed_plugin", None) is not None
         self.is_fsdp_enabled = getattr(self.accelerator.state, "fsdp_plugin", None) is not None
 
-        # post accelerator creation setup
+        # Configure FSDP if enabled
         if self.is_fsdp_enabled:
             fsdp_plugin = self.accelerator.state.fsdp_plugin
             fsdp_plugin.limit_all_gathers = self.args.fsdp_config.get(
@@ -160,10 +207,19 @@ class AGUVISTrainer(Trainer):
                         "when using FSDP."
                     )
 
+        # Propagate args to DeepSpeed if needed
         if self.is_deepspeed_enabled and getattr(self.args, "hf_deepspeed_config", None) is None:
             self.propagate_args_to_deepspeed()
 
     def _get_train_sampler(self) -> Optional[torch.utils.data.Sampler]:
+        """
+        Get sampler for training data.
+        
+        Returns:
+        - LengthGroupedSampler if grouping by length is enabled
+        - RandomSampler otherwise
+        - None if dataset has no length
+        """
         if self.train_dataset is None or not has_length(self.train_dataset):
             return None
 
@@ -186,23 +242,23 @@ class AGUVISTrainer(Trainer):
 
     def get_train_dataloader(self) -> DataLoader:
         """
-        Returns the training [`~torch.utils.data.DataLoader`].
-
-        Will use no sampler if `train_dataset` does not implement `__len__`, a random sampler (adapted to distributed
-        training if necessary) otherwise.
-
-        Subclass and override this method if you want to inject some custom behavior.
+        Create training DataLoader with appropriate configuration.
+        
+        Handles column removal, collation, and sampler setup.
         """
         if self.train_dataset is None:
             raise ValueError("Trainer: training requires a train_dataset.")
 
         train_dataset = self.train_dataset
         data_collator = self.data_collator
+        
+        # Remove unused columns based on dataset type
         if is_datasets_available() and isinstance(train_dataset, datasets.Dataset):
             train_dataset = self._remove_unused_columns(train_dataset, description="training")
         else:
             data_collator = self._get_collator_with_removed_columns(data_collator, description="training")
 
+        # Configure dataloader parameters
         dataloader_params = {
             "batch_size": self._train_batch_size,
             "collate_fn": data_collator,
@@ -211,6 +267,7 @@ class AGUVISTrainer(Trainer):
             "persistent_workers": self.args.dataloader_persistent_workers,
         }
 
+        # Add sampler and worker settings for non-iterable datasets
         if not isinstance(train_dataset, torch.utils.data.IterableDataset):
             dataloader_params["sampler"] = self._get_train_sampler()
             dataloader_params["drop_last"] = self.args.dataloader_drop_last
@@ -225,10 +282,9 @@ class AGUVISTrainer(Trainer):
 
     def create_optimizer(self):
         """
-        Setup the optimizer.
-
-        We provide a reasonable default that works well. If you want to use something else, you can pass a tuple in the
-        Trainer's init through `optimizers`, or subclass and override this method in a subclass.
+        Create optimizer with weight decay applied selectively.
+        
+        Separates parameters into groups with and without weight decay.
         """
         if is_sagemaker_mp_enabled():
             return super().create_optimizer()
@@ -236,8 +292,11 @@ class AGUVISTrainer(Trainer):
         opt_model = self.model
 
         if self.optimizer is None:
+            # Get parameters that should have weight decay
             decay_parameters = get_parameter_names(opt_model, ALL_LAYERNORM_LAYERS)
             decay_parameters = [name for name in decay_parameters if "bias" not in name]
+            
+            # Group parameters by weight decay application
             optimizer_grouped_parameters = [
                 {
                     "params": [
@@ -261,10 +320,12 @@ class AGUVISTrainer(Trainer):
 
     def create_optimizer_with_different_learning_rates(self):
         """
-        Setup the optimizer.
-
-        We provide a reasonable default that works well. If you want to use something else, you can pass a tuple in the
-        Trainer's init through `optimizers`, or subclass and override this method in a subclass.
+        Create optimizer with different learning rates for different parameter groups.
+        
+        Groups parameters by:
+        1. New vs existing parameters
+        2. Weight decay vs no weight decay
+        Each group gets appropriate learning rate and weight decay settings.
         """
         if is_sagemaker_mp_enabled():
             raise NotImplementedError("Sagemaker MP is not supported for separate learning rate yet")
@@ -273,15 +334,22 @@ class AGUVISTrainer(Trainer):
         opt_model = self.model
 
         if self.optimizer is None:
+            # Get parameters that should have weight decay
             decay_parameters = get_parameter_names(opt_model, ALL_LAYERNORM_LAYERS)
             decay_parameters = [name for name in decay_parameters if "bias" not in name]
 
+            # Identify new parameters that should use different learning rate
             new_parameters = []
             for name, param in opt_model.named_parameters():
                 if ("pointer_head" in name) or ("embed_tokens" in name):
                     new_parameters.append(name)
             rank0_print(f"new_parameters: {len(new_parameters)}")
             
+            # Group parameters by:
+            # 1. Existing params with weight decay
+            # 2. Existing params without weight decay  
+            # 3. New params with weight decay
+            # 4. New params without weight decay
             optimizer_grouped_parameters = [
                 {
                     "params": [p for n, p in opt_model.named_parameters() if ((n in decay_parameters) and (n not in new_parameters) and p.requires_grad)],
@@ -305,7 +373,8 @@ class AGUVISTrainer(Trainer):
                 },
             ]
 
-            optimizer_cls, optimizer_kwargs = Trainer.get_optimizer_cls_and_kwargs(self.args) # {'lr': 0.0001, 'betas': (0.9, 0.999), 'eps': 1e-08}
+            # Create optimizer without default learning rate
+            optimizer_cls, optimizer_kwargs = Trainer.get_optimizer_cls_and_kwargs(self.args)
             optimizer_kwargs.pop("lr")
 
             self.optimizer = optimizer_cls(optimizer_grouped_parameters, **optimizer_kwargs)

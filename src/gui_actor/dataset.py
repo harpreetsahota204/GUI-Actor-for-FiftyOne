@@ -8,23 +8,40 @@ from qwen_vl_utils import process_vision_info
 from torch.utils.data import Dataset
 
 from gui_actor.constants import (
-    IGNORE_INDEX,
-    DEFAULT_POINTER_START_TOKEN,
-    DEFAULT_POINTER_PAD_TOKEN,
-    DEFAULT_POINTER_END_TOKEN,
-    ACTION_PATTENS_XY
+    IGNORE_INDEX,  # Token ID to ignore in loss calculation
+    DEFAULT_POINTER_START_TOKEN,  # Special token marking start of pointer sequence
+    DEFAULT_POINTER_PAD_TOKEN,  # Special token for padding pointer sequences
+    DEFAULT_POINTER_END_TOKEN,  # Special token marking end of pointer sequence
+    ACTION_PATTENS_XY  # Regex patterns for extracting coordinate pairs
 )
 
 def reformat_coordinates(text):
     """
-    (1) Find all the coordinates in the text.
-    (2) Replace the coordinates with the special tokens.
-    (3) Return the new text and the coordinates as a list of (x, y), where x in [0, 1] and y in [0, 1].
+    Process text to extract and standardize coordinate references.
+    
+    This function:
+    1. Finds all coordinate pairs in the text using regex patterns
+    2. Replaces coordinates with special pointer tokens
+    3. Normalizes coordinates to [0,1] range
+    
+    Args:
+        text (str): Input text containing coordinate references
+        
+    Returns:
+        tuple: (processed_text, coordinates_list) where:
+            - processed_text has coordinates replaced with special tokens
+            - coordinates_list contains extracted (x,y) pairs normalized to [0,1]
     """
-    epsilon = 0.001
+    epsilon = 0.001  # Small value to avoid exact 0 or 1 coordinates
     def adjust_coord(c):
         """
-        Adjust coordinate if it is too close to 0 or 1.
+        Adjust coordinate value to avoid exact 0 or 1.
+        
+        Args:
+            c (float): Raw coordinate value
+            
+        Returns:
+            float: Adjusted coordinate slightly offset from 0 or 1 if needed
         """
         if abs(c) < epsilon:
             return epsilon
@@ -32,14 +49,19 @@ def reformat_coordinates(text):
             return 1 - epsilon
         return c
 
+    # Store all regex matches with their positions
     all_matches = []
     for pattern in ACTION_PATTENS_XY:
         matches = list(re.finditer(pattern, text))
         for match in matches:
             all_matches.append((match.start(), match.groups()))
+        
+        # Replace coordinates with special token sequences
         if pattern == ACTION_PATTENS_XY[0]:
+            # Single coordinate pair
             target_text = f"{DEFAULT_POINTER_START_TOKEN}{DEFAULT_POINTER_PAD_TOKEN}{DEFAULT_POINTER_END_TOKEN}"
         else:
+            # Double coordinate pair
             target_text = f"{DEFAULT_POINTER_START_TOKEN}{DEFAULT_POINTER_PAD_TOKEN}{DEFAULT_POINTER_END_TOKEN}, {DEFAULT_POINTER_START_TOKEN}{DEFAULT_POINTER_PAD_TOKEN}{DEFAULT_POINTER_END_TOKEN}"
         text = re.sub(
             pattern,
@@ -47,18 +69,18 @@ def reformat_coordinates(text):
             text
         )
     
+    # Process matches in order of appearance
     coordinates = []
     all_matches.sort(key=lambda x: x[0])
-    # Extract coordinates in order
     for _, groups in all_matches:
-        # When two coordinate values are found, parse them as one (x, y) pair.
         if len(groups) == 2:
+            # Single coordinate pair
             x_str, y_str = groups
             x = adjust_coord(ast.literal_eval(x_str))
             y = adjust_coord(ast.literal_eval(y_str))
             coordinates.append((x, y))
-        # When four coordinate values are found, parse them as two pairs.
         elif len(groups) == 4:
+            # Two coordinate pairs
             x1_str, y1_str, x2_str, y2_str = groups
             x1 = adjust_coord(ast.literal_eval(x1_str))
             y1 = adjust_coord(ast.literal_eval(y1_str))
@@ -71,78 +93,104 @@ def reformat_coordinates(text):
 
 def get_token_index(image_processor, image, point_x, point_y):
     """
-    Get the index of the visual token that contains the point (x, y).
+    Convert a point coordinate to its corresponding visual token index.
+    
     Args:
-        image_processor: the image processor
-        image: the image in PIL format
-        point_x: the x coordinate of the point, in [0, 1].
-        point_y: the y coordinate of the point, in [0, 1].
+        image_processor: Processor containing patch size configuration
+        image: List containing single PIL image
+        point_x: X coordinate normalized to [0,1]
+        point_y: Y coordinate normalized to [0,1]
+        
+    Returns:
+        int: Index of the visual token containing the point
+        
+    Raises:
+        ValueError: If more than one image provided
     """
     if len(image) != 1:
         raise ValueError(f"Expected 1 image, got {len(image)}")
     
-    # get the original image size and the resized image size
+    # Convert normalized coordinates to pixel coordinates
     image = image[0]
     w, h = image.size
     px, py = w * point_x, h * point_y
-    # rank0_print(f"px: {px}, py: {py}")
-    # get the token index
+    
+    # Calculate token grid position
     merge_patch_size = image_processor.patch_size * image_processor.merge_size
     x_index = math.floor(px / merge_patch_size)
     y_index = math.floor(py / merge_patch_size)
     
+    # Convert 2D grid position to flattened index
     visual_token_index = y_index * (w // merge_patch_size) + x_index
 
-    # merge all above print into one line
     return visual_token_index
 
 def get_multi_patch_labels(image_processor, image, bbox_gt):
     """
-    Get the multi-patch labels for the bounding box.
+    Generate binary mask indicating which visual tokens overlap with a bounding box.
+    
     Args:
-        image_processor: the image processor
-        image: the image in PIL format
-        bbox_gt: the bounding box in the format of (x_min, y_min, x_max, y_max) [0,1]
+        image_processor: Processor containing patch size configuration
+        image: List containing single PIL image
+        bbox_gt: Bounding box coordinates [x_min, y_min, x_max, y_max] normalized to [0,1]
+        
+    Returns:
+        torch.Tensor: Binary mask of shape (H*W,) where H,W are grid dimensions
+        
+    Raises:
+        ValueError: If more than one image provided
     """
     if len(image) != 1:
         raise ValueError(f"Expected 1 image, got {len(image)}")
 
-    # Get the original image size and the resized image size
+    # Convert normalized bbox to pixel coordinates
     image = image[0]
     w, h = image.size
-
     bbox_gt = [bbox_gt[0]*w, bbox_gt[1]*h, bbox_gt[2]*w, bbox_gt[3]*h]
-    # Extract bounding box coordinates
     x_min, y_min, x_max, y_max = bbox_gt
+    
+    # Clamp coordinates to image boundaries
     x_min = max(0, x_min)
     y_min = max(0, y_min)
     x_max = min(w, x_max)
     y_max = min(h, y_max)
 
+    # Calculate grid dimensions
     merge_patch_size = image_processor.patch_size * image_processor.merge_size
     assert w % merge_patch_size == 0 and h % merge_patch_size == 0, f"Image size {w}x{h} is not divisible by merge_patch_size {merge_patch_size}"
     grid_h, grid_w = h // merge_patch_size, w // merge_patch_size
 
+    # Create binary mask for overlapping patches
     binary_mask = torch.zeros(grid_h * grid_w)
-    # Iterate through all patches, check if they overlap with the bounding box
     for y_idx in range(grid_h):
         for x_idx in range(grid_w):
-            # Calculate patch boundaries
+            # Get patch boundaries
             patch_x_min = x_idx * merge_patch_size
             patch_y_min = y_idx * merge_patch_size
             patch_x_max = patch_x_min + merge_patch_size
             patch_y_max = patch_y_min + merge_patch_size
             
-            # Check if patch overlaps with the bounding box
+            # Check for overlap with bbox
             if not (patch_x_max <= x_min or patch_x_min >= x_max or 
                     patch_y_max <= y_min or patch_y_min >= y_max):
-                # Calculate patch index in the flattened grid
                 patch_idx = y_idx * grid_w + x_idx
                 binary_mask[patch_idx] = 1
 
     return binary_mask
 
 def token_index_to_coordinates(image_processor, visual_token_index, image_width, image_height):
+    """
+    Convert a visual token index back to pixel coordinates of its center.
+    
+    Args:
+        image_processor: Processor containing patch size configuration
+        visual_token_index: Index of visual token in flattened grid
+        image_width: Original image width in pixels
+        image_height: Original image height in pixels
+        
+    Returns:
+        tuple: (px, py) center coordinates of the token in pixels
+    """
     merge_patch_size = image_processor.patch_size * image_processor.merge_size
     x_index = visual_token_index % (image_width // merge_patch_size)
     y_index = visual_token_index // (image_width // merge_patch_size)
@@ -151,31 +199,56 @@ def token_index_to_coordinates(image_processor, visual_token_index, image_width,
     return px, py
 
 class GUIActorFiftyOneCollator:
+    """
+    Collator class for processing GUI interaction data from FiftyOne dataset.
+    
+    This class handles:
+    - Loading and preprocessing images
+    - Extracting coordinate information
+    - Tokenizing text
+    - Computing visual token indices and patch labels
+    - Batching samples together
+    """
+    
     def __init__(self, processor, tokenizer):
+        """
+        Initialize collator with processors.
+        
+        Args:
+            processor: Vision-language processor for multimodal inputs
+            tokenizer: Tokenizer for text processing
+        """
         self.processor = processor
         self.tokenizer = tokenizer
         self.pointer_pad_token_id = tokenizer.convert_tokens_to_ids(DEFAULT_POINTER_PAD_TOKEN)
         
     def __call__(self, batch):
-        # Process each sample
+        """
+        Process a batch of samples from the dataset.
+        
+        Args:
+            batch: List of samples, each containing message_payloads and filepath
+            
+        Returns:
+            dict: Processed batch with input_ids, attention_mask, labels, and visual features
+        """
         processed_samples = []
         for item in batch:
             messages = item['message_payloads'][0]  # Get first annotation
             filepath = item['filepath']
             
-            # Load image
+            # Load and convert image
             image = Image.open(filepath).convert('RGB')
             
-            # Extract point_gt or bbox_gt from assistant message
-            assistant_msg = messages[-1]  # Last message is assistant
+            # Get ground truth coordinates/bbox from assistant message
+            assistant_msg = messages[-1]
             point_gt = assistant_msg.get('point_gt')
             bbox_gt = assistant_msg.get('bbox_gt')
             
-            # Process the conversation with image
+            # Replace filepath references with actual image
             messages_with_image = []
             for msg in messages:
                 if msg['role'] == 'user':
-                    # Replace filepath with actual image for processing
                     content = []
                     for c in msg['content']:
                         if c['type'] == 'image':
@@ -186,33 +259,34 @@ class GUIActorFiftyOneCollator:
                 else:
                     messages_with_image.append(msg)
             
-            # Process vision info to get resized images
+            # Process images to get resized versions
             image_inputs, _ = process_vision_info(messages_with_image)
             
-            # Apply chat template
+            # Apply chat template to format conversation
             text = self.processor.apply_chat_template(
                 messages_with_image,
                 tokenize=False,
                 add_generation_prompt=False
             )
             
-            # Replace coordinates with special tokens and extract them
+            # Extract and standardize coordinates
             text, coordinates = reformat_coordinates(text)
             
-            # Process through processor
+            # Process through vision-language processor
             inputs = self.processor(
                 text=[text],
                 images=image_inputs if image_inputs else None,
                 return_tensors="pt"
             )
             
-            # Compute visual token indices and multi-patch labels
+            # Compute visual token indices and patch labels
             visual_token_indices = []
             multi_patch_labels = []
             
             if coordinates and image_inputs:
                 for coord in coordinates:
                     x, y = coord
+                    # Get token index for coordinate
                     visual_idx = get_token_index(
                         self.processor.image_processor,
                         image_inputs,
@@ -220,8 +294,9 @@ class GUIActorFiftyOneCollator:
                     )
                     visual_token_indices.append(visual_idx)
                     
-                    # Add multi-patch labels for bbox
+                    # Generate patch labels
                     if bbox_gt:
+                        # For bounding boxes, get overlapping patches
                         patch_mask = get_multi_patch_labels(
                             self.processor.image_processor,
                             image_inputs,
@@ -229,7 +304,7 @@ class GUIActorFiftyOneCollator:
                         )
                         multi_patch_labels.append(patch_mask)
                     elif point_gt:
-                        # For points, create small region mask
+                        # For points, mark single patch
                         n_visual = (inputs['image_grid_thw'][0][0] * 
                                   inputs['image_grid_thw'][0][1] // 
                                   (self.processor.image_processor.merge_size ** 2))
@@ -237,10 +312,11 @@ class GUIActorFiftyOneCollator:
                         patch_mask[visual_idx] = 1.0
                         multi_patch_labels.append(patch_mask)
             
-            # Create labels (shift input_ids for language modeling)
+            # Create language modeling labels
             labels = inputs['input_ids'].clone()
             labels[labels == self.tokenizer.pad_token_id] = IGNORE_INDEX
             
+            # Combine all features for this sample
             sample_dict = {
                 'input_ids': inputs['input_ids'][0],
                 'attention_mask': inputs['attention_mask'][0],
@@ -257,23 +333,32 @@ class GUIActorFiftyOneCollator:
             
             processed_samples.append(sample_dict)
         
-        # Batch the samples
+        # Collate individual samples into batch
         return self.collate_batch(processed_samples)
     
     def collate_batch(self, samples):
+        """
+        Collate individual samples into a batch.
+        
+        Args:
+            samples: List of processed sample dictionaries
+            
+        Returns:
+            dict: Batched samples with stacked tensors
+        """
         batch = {}
         
-        # Stack tensors
+        # Stack common tensors
         batch['input_ids'] = torch.stack([s['input_ids'] for s in samples])
         batch['attention_mask'] = torch.stack([s['attention_mask'] for s in samples])
         batch['labels'] = torch.stack([s['labels'] for s in samples])
         
-        # Handle images
+        # Handle optional image features
         if 'pixel_values' in samples[0]:
             batch['pixel_values'] = torch.cat([s['pixel_values'].unsqueeze(0) for s in samples])
             batch['image_grid_thw'] = torch.stack([s['image_grid_thw'] for s in samples])
         
-        # Handle coordinate supervision (list of tensors, one per sample)
+        # Handle optional coordinate features
         if 'visual_token_indices_of_coordinates' in samples[0]:
             batch['visual_token_indices_of_coordinates'] = [s.get('visual_token_indices_of_coordinates') for s in samples]
             batch['multi_patch_labels'] = [s.get('multi_patch_labels') for s in samples]
