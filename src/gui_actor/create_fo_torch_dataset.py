@@ -8,7 +8,7 @@ KP_SYSTEM_MESSAGE = """You are a GUI Agent specialized in interacting with the F
 
 You should output a response indicating the element type to interact with, action to be taken on that element, correct position of the action, and any additional metadata. 
 
-Your response must be a valid JSON wrapped in ```json blocks in exactly this format:
+Your response must be a valid JSON wrapped exactly this format:
 
 ```json
 {{"element_info": {element_info}, "label": "{label}", "points": {points}, "custom_metadata": {custom_metadata}}}
@@ -18,7 +18,7 @@ BB_SYSTEM_MESSAGE = """You are a GUI Agent specialized in interacting with the F
 
 You should output a response indicating the element type to interact with, action to be taken on that element, correct position of the action, and any additional metadata. 
 
-Your response must be a valid JSON wrapped in ```json blocks in exactly this format:
+Your response must be a valid JSON wrapped exactly this format:
 
 ```json
 {{"element_info": {element_info}, "label": "{label}", "bounding_box": {bounding_box}, "custom_metadata": {custom_metadata}}}
@@ -103,7 +103,7 @@ def add_message_payload_to_dataset(dataset):
                     bbox_gt_format = [x_min, y_min, x_max, y_max]
                     
                     # Create response with action and bounding box information
-                    response_text = f"""I can {action} the {element_info} at {bbox_gt_format} to complete this task. Here is the valid JSON response: ```json {{"action": "{action}", "element_info": {element_info}, "bounding_box": {bounding_box}, "custom_metadata": {custom_metadata}}}```"""
+                    response_text = f"""I can {action} the {element_info} from_coord={[x_min, y_min]} to_coord={[x_max, y_max]},  to complete this task. Here is the valid JSON response: ```json {{"action": "{action}", "element_info": {element_info}, "bounding_box": {bounding_box}, "custom_metadata": {custom_metadata}}}```"""
                     
                     # Create message payload in the correct format
                     messages = [
