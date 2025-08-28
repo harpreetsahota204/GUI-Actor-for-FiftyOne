@@ -156,7 +156,7 @@ class DataGetter(GetItem):
 
         return {
             "filepath": d["filepath"],
-            "message_payloads": message_payloads,
+            "message_payload": message_payloads,
         }
     
 def create_torch_dataset(dataset_name):
