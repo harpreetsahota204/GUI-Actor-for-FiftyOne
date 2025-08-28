@@ -18,8 +18,9 @@ import torch.distributed as dist
 import transformers
 from accelerate import Accelerator, DataLoaderConfiguration
 from accelerate.utils import GradientAccumulationPlugin, InitProcessGroupKwargs
-from torch.utils.data import DataLoader, RandomSampler
+from torch.utils.data import DataLoader, RandomSampler, SequentialSampler
 from transformers import Trainer
+from fiftyone.utils.torch import FiftyOneTorchDataset
 
 from transformers.pytorch_utils import ALL_LAYERNORM_LAYERS
 from transformers.trainer import (
@@ -183,6 +184,48 @@ class AGUVISTrainer(Trainer):
         # Apply EOS token modification to save methods
         self._save = modify_eos_token(original_save)
         self.save_model = modify_eos_token(original_save_model)
+
+    def get_train_dataloader(self):
+        """
+        Override to add FiftyOne worker_init_fn for proper MongoDB handling in multi-worker scenarios.
+        """
+        # Call parent's method to get the standard dataloader
+        dataloader = super().get_train_dataloader()
+        
+        # If it's already a DataLoader, recreate it with worker_init_fn
+        if isinstance(dataloader, DataLoader):
+            return DataLoader(
+                dataloader.dataset,
+                batch_size=dataloader.batch_size,
+                sampler=dataloader.sampler,
+                collate_fn=dataloader.collate_fn,
+                num_workers=dataloader.num_workers,
+                pin_memory=dataloader.pin_memory,
+                drop_last=dataloader.drop_last,
+                worker_init_fn=FiftyOneTorchDataset.worker_init,  # Add FiftyOne worker init
+            )
+        return dataloader
+    
+    def get_eval_dataloader(self, eval_dataset=None):
+        """
+        Override to add FiftyOne worker_init_fn for proper MongoDB handling in multi-worker scenarios.
+        """
+        # Call parent's method to get the standard dataloader
+        dataloader = super().get_eval_dataloader(eval_dataset)
+        
+        # If it's already a DataLoader, recreate it with worker_init_fn
+        if isinstance(dataloader, DataLoader):
+            return DataLoader(
+                dataloader.dataset,
+                batch_size=dataloader.batch_size,
+                sampler=dataloader.sampler,
+                collate_fn=dataloader.collate_fn,
+                num_workers=dataloader.num_workers,
+                pin_memory=dataloader.pin_memory,
+                drop_last=dataloader.drop_last,
+                worker_init_fn=FiftyOneTorchDataset.worker_init,  # Add FiftyOne worker init
+            )
+        return dataloader
 
     def create_accelerator_and_postprocess(self):
         """
