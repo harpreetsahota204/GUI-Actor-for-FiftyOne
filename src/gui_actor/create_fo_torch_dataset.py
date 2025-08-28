@@ -1,5 +1,6 @@
 import argparse
 import os
+import sys
 import fiftyone as fo
 from fiftyone.utils.torch import GetItem
 import fiftyone.utils.random as four

@@ -7,7 +7,7 @@ import torch
 from qwen_vl_utils import process_vision_info
 from torch.utils.data import Dataset
 
-from gui_actor.constants import (
+from constants import (
     IGNORE_INDEX,  # Token ID to ignore in loss calculation
     DEFAULT_POINTER_START_TOKEN,  # Special token marking start of pointer sequence
     DEFAULT_POINTER_PAD_TOKEN,  # Special token for padding pointer sequences
@@ -208,6 +208,7 @@ class GUIActorFiftyOneCollator:
         self.processor = processor
         self.tokenizer = tokenizer
         self.pointer_pad_token_id = tokenizer.convert_tokens_to_ids(DEFAULT_POINTER_PAD_TOKEN)
+        self.pointer_end_token_id = tokenizer.convert_tokens_to_ids(DEFAULT_POINTER_END_TOKEN)
         
     def __call__(self, batch):
         """
@@ -217,7 +218,7 @@ class GUIActorFiftyOneCollator:
             batch: List of samples, each containing message_payloads and filepath
             
         Returns:
-            dict: Processed batch with input_ids, attention_mask, labels, and visual features
+            dict: Processed batch with input_ids, labels, and visual features matching trainer expectations
         """
         processed_samples = []
         for item in batch:
@@ -253,7 +254,7 @@ class GUIActorFiftyOneCollator:
             multi_patch_labels = []
             
             if coordinates and image_inputs:
-                for coord in coordinates:
+                for i, coord in enumerate(coordinates):
                     x, y = coord
                     # Get token index for coordinate
                     visual_idx = get_token_index(
@@ -263,42 +264,45 @@ class GUIActorFiftyOneCollator:
                     )
                     visual_token_indices.append(visual_idx)
                     
-                    # Generate patch labels
-                    if bbox_gt:
-                        # For bounding boxes, get overlapping patches
+                # Generate patch labels based on ground truth type
+                if bbox_gt:
+                    # For bounding boxes, get overlapping patches for each coordinate pair
+                    # Since bbox has 2 coordinates, we need patch labels for both
+                    for _ in coordinates:
                         patch_mask = get_multi_patch_labels(
                             self.processor.image_processor,
                             image_inputs,
                             bbox_gt
                         )
                         multi_patch_labels.append(patch_mask)
-                    elif point_gt:
-                        # For points, mark single patch
-                        n_visual = (inputs['image_grid_thw'][0][0] * 
-                                  inputs['image_grid_thw'][0][1] // 
-                                  (self.processor.image_processor.merge_size ** 2))
-                        patch_mask = torch.zeros(n_visual)
-                        patch_mask[visual_idx] = 1.0
-                        multi_patch_labels.append(patch_mask)
+                elif point_gt:
+                    # For single point, mark single patch
+                    n_visual = (inputs['image_grid_thw'][0][0] * 
+                              inputs['image_grid_thw'][0][1] // 
+                              (self.processor.image_processor.merge_size ** 2))
+                    patch_mask = torch.zeros(n_visual)
+                    patch_mask[visual_token_indices[0]] = 1.0
+                    multi_patch_labels.append(patch_mask)
             
             # Create language modeling labels
             labels = inputs['input_ids'].clone()
             labels[labels == self.tokenizer.pad_token_id] = IGNORE_INDEX
+            # Also ignore pointer end tokens in labels (matching original dataset)
+            labels[labels == self.pointer_end_token_id] = IGNORE_INDEX
             
-            # Combine all features for this sample
+            # Combine all features for this sample (matching original dataset format)
             sample_dict = {
                 'input_ids': inputs['input_ids'][0],
-                'attention_mask': inputs['attention_mask'][0],
                 'labels': labels[0],
+                'coordinates': coordinates if coordinates else None,
+                'visual_token_indices_of_coordinates': torch.tensor(visual_token_indices, dtype=torch.long) if visual_token_indices else None,
+                'multi_patch_labels': torch.stack(multi_patch_labels) if multi_patch_labels else None,
             }
             
             if image_inputs:
-                sample_dict['pixel_values'] = inputs['pixel_values'][0]
-                sample_dict['image_grid_thw'] = inputs['image_grid_thw'][0]
-            
-            if visual_token_indices:
-                sample_dict['visual_token_indices_of_coordinates'] = torch.tensor(visual_token_indices)
-                sample_dict['multi_patch_labels'] = torch.stack(multi_patch_labels) if multi_patch_labels else None
+                # Note: pixel_values from Qwen2.5-VL processor may already be in patch format
+                sample_dict['pixel_values'] = inputs['pixel_values']  # Keep as returned by processor
+                sample_dict['image_grid_thw'] = inputs['image_grid_thw']
             
             processed_samples.append(sample_dict)
         
@@ -307,29 +311,52 @@ class GUIActorFiftyOneCollator:
     
     def collate_batch(self, samples):
         """
-        Collate individual samples into a batch.
+        Collate individual samples into a batch matching the format expected by the trainer.
         
         Args:
             samples: List of processed sample dictionaries
             
         Returns:
-            dict: Batched samples with stacked tensors
+            dict: Batched samples with properly formatted tensors and lists
         """
         batch = {}
         
-        # Stack common tensors
-        batch['input_ids'] = torch.stack([s['input_ids'] for s in samples])
-        batch['attention_mask'] = torch.stack([s['attention_mask'] for s in samples])
-        batch['labels'] = torch.stack([s['labels'] for s in samples])
+        # Find max sequence length for padding
+        max_length = max(s['input_ids'].shape[0] for s in samples)
         
-        # Handle optional image features
-        if 'pixel_values' in samples[0]:
-            batch['pixel_values'] = torch.cat([s['pixel_values'].unsqueeze(0) for s in samples])
-            batch['image_grid_thw'] = torch.stack([s['image_grid_thw'] for s in samples])
+        # Pad and stack input_ids and labels
+        padded_input_ids = []
+        padded_labels = []
         
-        # Handle optional coordinate features
-        if 'visual_token_indices_of_coordinates' in samples[0]:
-            batch['visual_token_indices_of_coordinates'] = [s.get('visual_token_indices_of_coordinates') for s in samples]
-            batch['multi_patch_labels'] = [s.get('multi_patch_labels') for s in samples]
+        for sample in samples:
+            seq_len = sample['input_ids'].shape[0]
+            if seq_len < max_length:
+                # Pad input_ids with pad_token_id
+                padding = torch.full((max_length - seq_len,), self.tokenizer.pad_token_id, dtype=sample['input_ids'].dtype)
+                padded_input = torch.cat([sample['input_ids'], padding])
+                
+                # Pad labels with IGNORE_INDEX
+                label_padding = torch.full((max_length - seq_len,), IGNORE_INDEX, dtype=sample['labels'].dtype)
+                padded_label = torch.cat([sample['labels'], label_padding])
+            else:
+                padded_input = sample['input_ids']
+                padded_label = sample['labels']
+            
+            padded_input_ids.append(padded_input)
+            padded_labels.append(padded_label)
+        
+        batch['input_ids'] = torch.stack(padded_input_ids)
+        batch['labels'] = torch.stack(padded_labels)
+        
+        # Handle optional image features - concatenate along batch dimension
+        if 'pixel_values' in samples[0] and samples[0]['pixel_values'] is not None:
+            # Concatenate pixel values along batch dimension
+            batch['pixel_values'] = torch.cat([s['pixel_values'] for s in samples], dim=0)
+            batch['image_grid_thw'] = torch.cat([s['image_grid_thw'] for s in samples], dim=0)
+        
+        # Handle coordinate features - keep as lists (matching original dataset)
+        batch['coordinates'] = [s['coordinates'] for s in samples]
+        batch['visual_token_indices_of_coordinates'] = [s.get('visual_token_indices_of_coordinates') for s in samples]
+        batch['multi_patch_labels'] = [s.get('multi_patch_labels') for s in samples]
         
         return batch
