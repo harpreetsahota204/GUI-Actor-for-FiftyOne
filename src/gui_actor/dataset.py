@@ -233,6 +233,11 @@ class GUIActorFiftyOneCollator:
         """
         processed_samples = []
         for item in batch:
+            # Check if message_payload exists and has content
+            if 'message_payload' not in item or not item['message_payload']:
+                print(f"Warning: Skipping sample with missing or empty message_payload. Item keys: {item.keys()}")
+                continue
+                
             messages = item['message_payload'][0]  # Already has filepath
             
             # Get ground truth coordinates/bbox from assistant message
@@ -316,6 +321,10 @@ class GUIActorFiftyOneCollator:
                 sample_dict['image_grid_thw'] = inputs['image_grid_thw']
             
             processed_samples.append(sample_dict)
+        
+        # Check if we have any valid samples
+        if not processed_samples:
+            raise ValueError("No valid samples in batch. All samples are missing message_payload.")
         
         # Collate individual samples into batch
         return self.collate_batch(processed_samples)

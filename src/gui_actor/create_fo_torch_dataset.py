@@ -142,18 +142,27 @@ class DataGetter(GetItem):
     def __call__(self, d):
         message_payloads = []
 
-        # Extract message_payload from keypoints (if they exist)
+        # IMPORTANT: When using to_patches(), each patch contains EITHER a keypoint OR a detection, never both
+        # - Keypoint patches: keypoints field has data, detections is None
+        # - Detection patches: detections field has data, keypoints is None
+        
+        # Extract message_payload from keypoints (if this is a keypoint patch)
         keypoints = d.get("keypoints")
-        if keypoints is not None and hasattr(keypoints, 'message_payload'):
-            # If keypoints is a single object with message_payload
-            message_payloads.append(keypoints.message_payload)
+        if keypoints is not None:
+            # This is a keypoint patch - get message_payload from the single keypoint object
+            msg_payload = getattr(keypoints, 'message_payload', None)
+            if msg_payload is not None:
+                message_payloads.append(msg_payload)
 
-        # Extract message_payload from detections (if they exist)
+        # Extract message_payload from detections (if this is a detection patch)
         detections = d.get("detections")
-        if detections is not None and hasattr(detections, 'message_payload'):
-            # detections is a single Detection object, not a Detections collection
-            message_payloads.append(detections.message_payload)
+        if detections is not None:
+            # This is a detection patch - get message_payload from the single detection object
+            msg_payload = getattr(detections, 'message_payload', None)
+            if msg_payload is not None:
+                message_payloads.append(msg_payload)
 
+        # Note: message_payloads will have exactly 0 or 1 items (never both keypoint and detection)
         return {
             "filepath": d["filepath"],
             "message_payload": message_payloads,
