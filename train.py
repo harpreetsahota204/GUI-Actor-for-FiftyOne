@@ -1,7 +1,6 @@
 import torch
 import transformers
 from transformers import AutoProcessor, TrainingArguments
-from torch.utils.data import DataLoader
 import argparse
 
 from gui_actor.modeling_qwen25vl import Qwen2_5_VLForConditionalGenerationWithPointer
