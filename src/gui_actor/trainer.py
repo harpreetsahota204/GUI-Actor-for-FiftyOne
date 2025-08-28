@@ -30,7 +30,7 @@ from transformers.trainer import (
     is_sagemaker_mp_enabled,
 )
 from transformers.trainer_pt_utils import LengthGroupedSampler as HFLengthGroupedSampler
-from transformers.trainer_utils import seed_worker
+# Import removed - will define custom seed_worker function below
 from transformers.utils import logging
 
 if is_datasets_available():
@@ -97,6 +97,24 @@ def safe_save_model_for_hf_trainer(trainer: transformers.Trainer, output_dir: st
         trainer._save(output_dir, state_dict=cpu_state_dict)
 
 
+def seed_worker(worker_id):
+    """
+    Worker init function for DataLoader.
+    
+    Sets different random seed for each worker to ensure reproducibility
+    while maintaining randomness across workers.
+    
+    Args:
+        worker_id: ID of the worker process (passed by PyTorch DataLoader)
+    """
+    import random
+    import numpy as np
+    
+    worker_seed = torch.initial_seed() % 2**32
+    np.random.seed(worker_seed)
+    random.seed(worker_seed)
+
+
 class AGUVISTrainer(Trainer):
     """
     Custom trainer for GUI interaction tasks extending HF Trainer.
@@ -109,6 +127,14 @@ class AGUVISTrainer(Trainer):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        
+        # Initialize newer Trainer attributes for compatibility
+        if not hasattr(self, 'is_tp_enabled'):
+            self.is_tp_enabled = False
+        if not hasattr(self, 'is_sagemaker_dp_enabled'):
+            self.is_sagemaker_dp_enabled = False
+        if not hasattr(self, 'is_sagemaker_mp_enabled'):
+            self.is_sagemaker_mp_enabled = False
 
         # Store original save methods
         original_save = self._save
@@ -231,8 +257,8 @@ class AGUVISTrainer(Trainer):
                 dataset=self.train_dataset,
                 lengths=lengths,
             )
-        elif self.args.group_by_modality_length:
-            lengths = self.train_dataset.modality_lengths
+        elif getattr(self.args, 'group_by_modality_length', False):
+            lengths = getattr(self.train_dataset, 'modality_lengths', self.train_dataset.lengths)
             return HFLengthGroupedSampler(
                 self.args.train_batch_size * self.args.gradient_accumulation_steps,
                 dataset=self.train_dataset,
@@ -365,12 +391,12 @@ class AGUVISTrainer(Trainer):
                 {
                     "params": [p for n, p in opt_model.named_parameters() if ((n in decay_parameters) and (n in new_parameters) and p.requires_grad)],
                     "weight_decay": self.args.weight_decay,
-                    "lr": self.args.learning_rate_new_params,
+                    "lr": getattr(self.args, 'learning_rate_new_params', self.args.learning_rate * 10),
                 },
                 {
                     "params": [p for n, p in opt_model.named_parameters() if ((n not in decay_parameters) and (n in new_parameters) and p.requires_grad)],
                     "weight_decay": 0.0,
-                    "lr": self.args.learning_rate_new_params,
+                    "lr": getattr(self.args, 'learning_rate_new_params', self.args.learning_rate * 10),
                 },
             ]
 
