@@ -103,7 +103,7 @@ def add_message_payload_to_dataset(dataset):
                     bbox_gt_format = [x_min, y_min, x_max, y_max]
                     
                     # Create response with action and bounding box information
-                    response_text = f"""I can {action} the {element_info} from_coord={[x_min, y_min]} to_coord={[x_max, y_max]},  to complete this task. Here is the valid JSON response: ```json {{"action": "{action}", "element_info": {element_info}, "bounding_box": {bounding_box}, "custom_metadata": {custom_metadata}}}```"""
+                    response_text = f"""I can {action} the {element_info} from_coord={x_min:.3f, y_min:.3f} to_coord={x_max:.3f, y_max:.3f},  to complete this task. Here is the valid JSON response: ```json {{"action": "{action}", "element_info": {element_info}, "bounding_box": {bbox_gt_format}, "custom_metadata": {custom_metadata}}}```"""
                     
                     # Create message payload in the correct format
                     messages = [
