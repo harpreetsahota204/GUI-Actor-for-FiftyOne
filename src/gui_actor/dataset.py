@@ -276,7 +276,8 @@ class GUIActorFiftyOneCollator:
                 print(f"Warning: Skipping sample with missing or empty message_payload. Item keys: {item.keys()}")
                 continue
                 
-            messages = item['message_payload'][0]  # Already has filepath
+            # With the flattened dataset, message_payload is directly the list of messages
+            messages = item['message_payload']
             
             # Get ground truth coordinates/bbox from assistant message
             assistant_msg = messages[-1]
