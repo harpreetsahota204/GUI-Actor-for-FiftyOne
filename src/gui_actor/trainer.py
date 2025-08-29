@@ -19,19 +19,9 @@ from transformers.pytorch_utils import ALL_LAYERNORM_LAYERS
 from transformers.trainer import (
     get_parameter_names,
     has_length,
-    is_datasets_available,
 )
 from transformers.trainer_pt_utils import LengthGroupedSampler as HFLengthGroupedSampler
-
-# Only import if using FiftyOne datasets
-try:
-    from fiftyone.utils.torch import FiftyOneTorchDataset
-    HAS_FIFTYONE = True
-except ImportError:
-    HAS_FIFTYONE = False
-
-if is_datasets_available():
-    import datasets
+from fiftyone.utils.torch import FiftyOneTorchDataset
 
 
 def seed_worker(worker_id):
@@ -46,12 +36,13 @@ def seed_worker(worker_id):
 
 class AGUVISTrainer(Trainer):
     """
-    Simplified trainer for single GPU training.
+    FiftyOne-specific trainer for GUI-Actor training.
     
     Features:
     - Custom EOS token handling during saving
     - Different learning rates for different parameter groups
-    - Optional FiftyOne dataset support
+    - FiftyOne dataset support with proper worker initialization
+    - No column removal (preserves all data fields)
     """
 
     def __init__(self, *args, **kwargs):
@@ -101,41 +92,7 @@ class AGUVISTrainer(Trainer):
         self._save = modify_eos_token(original_save)
         self.save_model = modify_eos_token(original_save_model)
     
-    # Only override if using FiftyOne datasets
-    if HAS_FIFTYONE:
-        def get_train_dataloader(self):
-            """Add FiftyOne's worker_init_fn for MongoDB handling."""
-            dataloader = super().get_train_dataloader()
-            
-            if isinstance(dataloader, DataLoader):
-                return DataLoader(
-                    dataloader.dataset,
-                    batch_size=dataloader.batch_size,
-                    sampler=dataloader.sampler,
-                    collate_fn=dataloader.collate_fn,
-                    num_workers=dataloader.num_workers,
-                    pin_memory=dataloader.pin_memory,
-                    drop_last=dataloader.drop_last,
-                    worker_init_fn=FiftyOneTorchDataset.worker_init,
-                )
-            return dataloader
-        
-        def get_eval_dataloader(self, eval_dataset=None):
-            """Add FiftyOne's worker_init_fn for MongoDB handling."""
-            dataloader = super().get_eval_dataloader(eval_dataset)
-            
-            if isinstance(dataloader, DataLoader):
-                return DataLoader(
-                    dataloader.dataset,
-                    batch_size=dataloader.batch_size,
-                    sampler=dataloader.sampler,
-                    collate_fn=dataloader.collate_fn,
-                    num_workers=dataloader.num_workers,
-                    pin_memory=dataloader.pin_memory,
-                    drop_last=dataloader.drop_last,
-                    worker_init_fn=FiftyOneTorchDataset.worker_init,
-                )
-            return dataloader
+
 
     def _get_train_sampler(self) -> Optional[torch.utils.data.Sampler]:
         """Get sampler for training data with optional length grouping."""
@@ -160,38 +117,51 @@ class AGUVISTrainer(Trainer):
             return RandomSampler(self.train_dataset)
 
     def get_train_dataloader(self) -> DataLoader:
-        """Create training DataLoader."""
+        """Create training DataLoader for FiftyOne datasets."""
         if self.train_dataset is None:
             raise ValueError("Trainer: training requires a train_dataset.")
 
-        train_dataset = self.train_dataset
-        data_collator = self.data_collator
-        
-        # Remove unused columns based on dataset type
-        if is_datasets_available() and isinstance(train_dataset, datasets.Dataset):
-            train_dataset = self._remove_unused_columns(train_dataset, description="training")
-        else:
-            data_collator = self._get_collator_with_removed_columns(data_collator, description="training")
-
-        # Configure dataloader parameters
+        # Configure dataloader parameters - no column removal for FiftyOne datasets
         dataloader_params = {
             "batch_size": self._train_batch_size,
-            "collate_fn": data_collator,
+            "collate_fn": self.data_collator,  # Use collator directly
             "num_workers": self.args.dataloader_num_workers,
             "pin_memory": self.args.dataloader_pin_memory,
             "persistent_workers": self.args.dataloader_persistent_workers,
         }
 
-        # Add sampler and worker settings for non-iterable datasets
-        if not isinstance(train_dataset, torch.utils.data.IterableDataset):
+        # Add sampler and worker settings
+        if not isinstance(self.train_dataset, torch.utils.data.IterableDataset):
             dataloader_params["sampler"] = self._get_train_sampler()
             dataloader_params["drop_last"] = self.args.dataloader_drop_last
-            dataloader_params["worker_init_fn"] = seed_worker
+            dataloader_params["worker_init_fn"] = FiftyOneTorchDataset.worker_init
             dataloader_params["prefetch_factor"] = (
                 self.args.dataloader_num_workers * 2 if self.args.dataloader_num_workers != 0 else None
             )
 
-        return DataLoader(train_dataset, **dataloader_params)
+        return DataLoader(self.train_dataset, **dataloader_params)
+
+    def get_eval_dataloader(self, eval_dataset=None) -> DataLoader:
+        """Create evaluation DataLoader for FiftyOne datasets."""
+        if eval_dataset is None:
+            eval_dataset = self.eval_dataset
+        if eval_dataset is None:
+            raise ValueError("Trainer: evaluation requires an eval_dataset.")
+
+        # Configure dataloader parameters - no column removal for FiftyOne datasets
+        dataloader_params = {
+            "batch_size": self.args.per_device_eval_batch_size,
+            "collate_fn": self.data_collator,  # Use collator directly
+            "num_workers": self.args.dataloader_num_workers,
+            "pin_memory": self.args.dataloader_pin_memory,
+            "drop_last": self.args.dataloader_drop_last,
+        }
+
+        # Add worker settings
+        if not isinstance(eval_dataset, torch.utils.data.IterableDataset):
+            dataloader_params["worker_init_fn"] = FiftyOneTorchDataset.worker_init
+
+        return DataLoader(eval_dataset, **dataloader_params)
 
     def create_optimizer(self):
         """Create optimizer with weight decay applied selectively."""
