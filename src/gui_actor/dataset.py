@@ -270,123 +270,155 @@ class GUIActorFiftyOneCollator:
             dict: Processed batch with input_ids, labels, and visual features matching trainer expectations
         """
         processed_samples = []
-        for item in batch:
-            # Check if message_payload exists and has content
-            if 'message_payload' not in item or not item['message_payload']:
-                # Skip silently - this can happen with empty batches in multi-worker scenarios
-                continue
+        for i, item in enumerate(batch):
+            try:
+                # Check if message_payload exists and has content
+                if 'message_payload' not in item or not item['message_payload']:
+                    print(f"Warning: Sample {i} in batch missing message_payload")
+                    continue
+                    
+                # With the flattened dataset, message_payload is directly the list of messages
+                messages = item['message_payload']
                 
-            # With the flattened dataset, message_payload is directly the list of messages
-            messages = item['message_payload']
-            
-            # Get ground truth coordinates/bbox from assistant message
-            assistant_msg = messages[-1]
-            point_gt = assistant_msg.get('point_gt')
-            bbox_gt = assistant_msg.get('bbox_gt')
-            
-            # Process images directly from messages with filepath
-            image_inputs, _ = process_vision_info(messages)
-            
-            # Apply chat template
-            text = self.processor.apply_chat_template(
-                messages,
-                tokenize=False,
-                add_generation_prompt=False
-            )
-
-            # Extract and standardize coordinates
-            text, coordinates = reformat_coordinates(text)
-            
-            # Process through vision-language processor
-            inputs = self.processor(
-                text=[text],
-                images=image_inputs if image_inputs else None,
-                return_tensors="pt",
-            )
-            
-            # Compute visual token indices and patch labels
-            visual_token_indices = []
-            multi_patch_labels = []
-            
-            if coordinates and image_inputs:
-                # Get image grid dimensions from processor output
-                image_grid_thw = inputs.get('image_grid_thw')
-                if image_grid_thw is not None:
-                    image_grid_thw = tuple(image_grid_thw[0].tolist())
+                # Validate messages structure
+                if not isinstance(messages, list) or len(messages) < 3:
+                    print(f"Warning: Sample {i} has invalid messages structure: {type(messages)}, length: {len(messages) if isinstance(messages, list) else 'N/A'}")
+                    continue
                 
-                for i, coord in enumerate(coordinates):
-                    x, y = coord
-                    # Get token index for coordinate
-                    visual_idx = get_token_index(
-                        self.processor.image_processor,
-                        image_inputs,
-                        x, y,
-                        image_grid_thw=image_grid_thw
+                # Get ground truth coordinates/bbox from assistant message
+                assistant_msg = messages[-1]
+                point_gt = assistant_msg.get('point_gt')
+                bbox_gt = assistant_msg.get('bbox_gt')
+                
+                # Process images directly from messages with filepath
+                try:
+                    image_inputs, _ = process_vision_info(messages)
+                except Exception as e:
+                    print(f"Warning: Failed to process vision info for sample {i}: {e}")
+                    continue
+                
+                # Apply chat template
+                try:
+                    text = self.processor.apply_chat_template(
+                        messages,
+                        tokenize=False,
+                        add_generation_prompt=False
                     )
-                    visual_token_indices.append(visual_idx)
+                except Exception as e:
+                    print(f"Warning: Failed to apply chat template for sample {i}: {e}")
+                    continue
+
+                # Extract and standardize coordinates
+                try:
+                    text, coordinates = reformat_coordinates(text)
+                except Exception as e:
+                    print(f"Warning: Failed to reformat coordinates for sample {i}: {e}")
+                    continue
+                
+                # Process through vision-language processor
+                try:
+                    inputs = self.processor(
+                        text=[text],
+                        images=image_inputs if image_inputs else None,
+                        return_tensors="pt",
+                    )
+                except Exception as e:
+                    print(f"Warning: Failed to process through vision-language processor for sample {i}: {e}")
+                    continue
+                
+                # Compute visual token indices and patch labels
+                visual_token_indices = []
+                multi_patch_labels = []
+                
+                try:
+                    if coordinates and image_inputs:
+                        # Get image grid dimensions from processor output
+                        image_grid_thw = inputs.get('image_grid_thw')
+                        if image_grid_thw is not None:
+                            image_grid_thw = tuple(image_grid_thw[0].tolist())
+                        
+                        for coord_idx, coord in enumerate(coordinates):
+                            x, y = coord
+                            # Get token index for coordinate
+                            visual_idx = get_token_index(
+                                self.processor.image_processor,
+                                image_inputs,
+                                x, y,
+                                image_grid_thw=image_grid_thw
+                            )
+                            visual_token_indices.append(visual_idx)
+                            
+                        # Generate patch labels based on ground truth type
+                        if bbox_gt:
+                            # For bounding boxes, get overlapping patches for each coordinate pair
+                            # Since bbox has 2 coordinates, we need patch labels for both
+                            for _ in coordinates:
+                                patch_mask = get_multi_patch_labels(
+                                    self.processor.image_processor,
+                                    image_inputs,
+                                    bbox_gt,
+                                    image_grid_thw=image_grid_thw
+                                )
+                                multi_patch_labels.append(patch_mask)
+                        elif point_gt:
+                            # For single point, mark single patch
+                            # Calculate the correct number of visual tokens
+                            tiles = inputs['image_grid_thw'][0][0]
+                            h_patches = inputs['image_grid_thw'][0][1]
+                            w_patches = inputs['image_grid_thw'][0][2]
+                            merge_size = self.processor.image_processor.merge_size
+                            
+                            # Number of visual tokens = (h_patches // merge_size) * (w_patches // merge_size)
+                            h_merged = h_patches // merge_size
+                            w_merged = w_patches // merge_size
+                            n_visual = h_merged * w_merged
+                            
+                            patch_mask = torch.zeros(n_visual)
+                            
+                            # Validate and clip the visual token index to valid range
+                            if visual_token_indices:
+                                token_idx = visual_token_indices[0]
+                                if token_idx >= n_visual:
+                                    print(f"Warning: Visual token index {token_idx} out of bounds for n_visual={n_visual}. Clipping to valid range.")
+                                    token_idx = min(token_idx, n_visual - 1)
+                                patch_mask[token_idx] = 1.0
+                            
+                            multi_patch_labels.append(patch_mask)
                     
-                # Generate patch labels based on ground truth type
-                if bbox_gt:
-                    # For bounding boxes, get overlapping patches for each coordinate pair
-                    # Since bbox has 2 coordinates, we need patch labels for both
-                    for _ in coordinates:
-                        patch_mask = get_multi_patch_labels(
-                            self.processor.image_processor,
-                            image_inputs,
-                            bbox_gt,
-                            image_grid_thw=image_grid_thw
-                        )
-                        multi_patch_labels.append(patch_mask)
-                elif point_gt:
-                    # For single point, mark single patch
-                    # Calculate the correct number of visual tokens
-                    tiles = inputs['image_grid_thw'][0][0]
-                    h_patches = inputs['image_grid_thw'][0][1]
-                    w_patches = inputs['image_grid_thw'][0][2]
-                    merge_size = self.processor.image_processor.merge_size
+                    # Create language modeling labels
+                    labels = inputs['input_ids'].clone()
+                    labels[labels == self.tokenizer.pad_token_id] = IGNORE_INDEX
+                    # Also ignore pointer end tokens in labels (matching original dataset)
+                    labels[labels == self.pointer_end_token_id] = IGNORE_INDEX
                     
-                    # Number of visual tokens = (h_patches // merge_size) * (w_patches // merge_size)
-                    h_merged = h_patches // merge_size
-                    w_merged = w_patches // merge_size
-                    n_visual = h_merged * w_merged
+                    # Combine all features for this sample (matching original dataset format)
+                    sample_dict = {
+                        'input_ids': inputs['input_ids'][0],
+                        'labels': labels[0],
+                        'coordinates': coordinates if coordinates else None,
+                        'visual_token_indices_of_coordinates': torch.tensor(visual_token_indices, dtype=torch.long) if visual_token_indices else None,
+                        'multi_patch_labels': torch.stack(multi_patch_labels) if multi_patch_labels else None,
+                    }
                     
-                    patch_mask = torch.zeros(n_visual)
+                    if image_inputs:
+                        # Note: pixel_values from Qwen2.5-VL processor may already be in patch format
+                        sample_dict['pixel_values'] = inputs['pixel_values']  # Keep as returned by processor
+                        sample_dict['image_grid_thw'] = inputs['image_grid_thw']
                     
-                    # Validate and clip the visual token index to valid range
-                    if visual_token_indices:
-                        token_idx = visual_token_indices[0]
-                        if token_idx >= n_visual:
-                            print(f"Warning: Visual token index {token_idx} out of bounds for n_visual={n_visual}. Clipping to valid range.")
-                            token_idx = min(token_idx, n_visual - 1)
-                        patch_mask[token_idx] = 1.0
+                    processed_samples.append(sample_dict)
                     
-                    multi_patch_labels.append(patch_mask)
-            
-            # Create language modeling labels
-            labels = inputs['input_ids'].clone()
-            labels[labels == self.tokenizer.pad_token_id] = IGNORE_INDEX
-            # Also ignore pointer end tokens in labels (matching original dataset)
-            labels[labels == self.pointer_end_token_id] = IGNORE_INDEX
-            
-            # Combine all features for this sample (matching original dataset format)
-            sample_dict = {
-                'input_ids': inputs['input_ids'][0],
-                'labels': labels[0],
-                'coordinates': coordinates if coordinates else None,
-                'visual_token_indices_of_coordinates': torch.tensor(visual_token_indices, dtype=torch.long) if visual_token_indices else None,
-                'multi_patch_labels': torch.stack(multi_patch_labels) if multi_patch_labels else None,
-            }
-            
-            if image_inputs:
-                # Note: pixel_values from Qwen2.5-VL processor may already be in patch format
-                sample_dict['pixel_values'] = inputs['pixel_values']  # Keep as returned by processor
-                sample_dict['image_grid_thw'] = inputs['image_grid_thw']
-            
-            processed_samples.append(sample_dict)
+                except Exception as e:
+                    print(f"Warning: Failed to process coordinates/labels for sample {i}: {e}")
+                    continue
+                    
+            except Exception as e:
+                print(f"Error: Failed to process sample {i} completely: {e}")
+                continue
         
         # Check if we have any valid samples
         if not processed_samples:
-            raise ValueError("No valid samples in batch. All samples are missing message_payload.")
+            print(f"Error: No valid samples in batch of size {len(batch)}. Check the warning messages above for details.")
+            raise ValueError(f"No valid samples in batch of size {len(batch)}. All samples failed processing - check logs for specific errors.")
         
         # Collate individual samples into batch
         return self.collate_batch(processed_samples)
