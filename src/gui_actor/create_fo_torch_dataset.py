@@ -177,6 +177,7 @@ class FlattenedDataset:
                         "filepath": filepath,
                         "message_payload": message_payload
                     })
+        print(f"FlattenedDataset created with {len(self.items)} items")
     
     def __len__(self):
         return len(self.items)
