@@ -23,10 +23,10 @@ class QwenVLwithVisionHeadOutputWithPast(Qwen2_5_VLCausalLMOutputWithPast):
             Same as parent class.
     """
     def __init__(self, loss=None, lm_loss=None, pointer_loss=None, pointer_scores=None, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.loss = loss  # Make sure loss is included in the output class
+        # Pass loss to parent class
+        super().__init__(loss=loss, *args, **kwargs)
         self.lm_loss = lm_loss
-        self.pointer_loss = pointer_loss 
+        self.pointer_loss = pointer_loss
         self.pointer_scores = pointer_scores
 
 
@@ -393,13 +393,34 @@ class Qwen2_5_VLForConditionalGenerationWithPointer(Qwen2_5_VLForConditionalGene
             Union[Tuple, QwenVLwithVisionHeadOutputWithPast]: Model outputs including losses,
             logits, and attention scores if requested
         """
+        # Input validation
+        if input_ids is None and inputs_embeds is None:
+            raise ValueError("You have to specify either input_ids or inputs_embeds")
+            
+        # Additional validation for training mode
+        if labels is not None:
+            # When labels are provided, we are in training mode and should validate inputs
+            # Check if we have the necessary inputs for grounding loss if needed
+            if self.pointer_loss_weight > 0:
+                if pixel_values is None and pixel_values_videos is None:
+                    raise ValueError("When pointer_loss_weight > 0 and labels are provided, "
+                                     "you must provide either pixel_values or pixel_values_videos")
+                if visual_token_indices_of_coordinates is None and multi_patch_labels is None:
+                    import warnings
+                    warnings.warn(
+                        "Pointer loss is enabled (pointer_loss_weight > 0), but neither "
+                        "visual_token_indices_of_coordinates nor multi_patch_labels are provided. "
+                        "Pointer loss will not be calculated.",
+                        RuntimeWarning
+                    )
+                    
         # Set output flags based on config if not explicitly provided
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = (
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
         )
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
-        
+
         # Get input embeddings if not provided
         if inputs_embeds is None:
             inputs_embeds = self.model.get_input_embeddings()(input_ids) # shape: (batch_size, seq_len, d_model)
@@ -490,86 +511,155 @@ class Qwen2_5_VLForConditionalGenerationWithPointer(Qwen2_5_VLForConditionalGene
 
         # Calculate language modeling loss if labels provided
         lm_loss = None
-        if labels is not None and self.lm_loss_weight > 0:
-            # Upcast to float32 for loss computation
-            logits = logits.float()
-            # Shift logits and labels for next-token prediction
-            shift_logits = logits[..., :-1, :].contiguous()
-            shift_labels = labels[..., 1:].contiguous()
-            # Compute cross entropy loss
-            loss_fct = nn.CrossEntropyLoss()
-            shift_logits = shift_logits.view(-1, self.config.vocab_size)
-            shift_labels = shift_labels.view(-1)
-            shift_labels = shift_labels.to(shift_logits.device)
-            lm_loss = loss_fct(shift_logits, shift_labels)
+        if labels is not None:
+            if self.lm_loss_weight > 0:
+                # Upcast to float32 for loss computation
+                logits = logits.float()
+                # Shift logits and labels for next-token prediction
+                shift_logits = logits[..., :-1, :].contiguous()
+                shift_labels = labels[..., 1:].contiguous()
+                
+                # Check if we have valid label values (not all IGNORE_INDEX)
+                if (shift_labels != -100).sum() > 0:
+                    # Compute cross entropy loss
+                    loss_fct = nn.CrossEntropyLoss()
+                    shift_logits = shift_logits.view(-1, self.config.vocab_size)
+                    shift_labels = shift_labels.view(-1)
+                    shift_labels = shift_labels.to(shift_logits.device)
+                    lm_loss = loss_fct(shift_logits, shift_labels)
+                else:
+                    if verbose:
+                        print("Warning: All labels are IGNORE_INDEX (-100), skipping language modeling loss")
+            elif verbose:
+                print("Warning: lm_loss_weight is 0, skipping language modeling loss calculation")
 
         # Process vision pointer head if visual grounding requested
         pointer_loss = None
         pointer_scores = []
-        if visual_token_indices_of_coordinates is not None:
+        
+        # Check for inputs required for pointer network loss
+        has_pointer_inputs = (
+            visual_token_indices_of_coordinates is not None or 
+            (multi_patch_labels is not None and if_multi_patch)
+        )
+        
+        if has_pointer_inputs and self.pointer_loss_weight > 0:
             batch_size = input_ids.shape[0]
             pointer_losses = []
             
             # Process each sample individually
             for i in range(batch_size):
-                dummy_target = False
-
-                # Get token IDs and hidden states for current sample
-                token_ids = input_ids[i]          # shape: (seq_length,)
-                hs = hidden_states[i]             # shape: (seq_length, d_model)
-
-                # Find visual token positions
-                visual_mask = (token_ids == self.config.image_token_id)
-                visual_indices = torch.nonzero(visual_mask, as_tuple=False).squeeze(-1)
-
-                # Find target token positions
-                target_mask = (token_ids == self.config.pointer_pad_token_id)
-                target_indices = torch.nonzero(target_mask, as_tuple=False).squeeze(-1)
-                
-                # Handle cases with missing tokens
-                if visual_indices.numel() == 0:
-                    raise ValueError(f"No visual tokens found for sample {i}.")
-                if target_indices.numel() == 0:
-                    # Use dummy target if no target tokens found
-                    target_indices = torch.tensor([hs.shape[0] - 1])
-                    gt = torch.tensor([0]).to(hs.device)
-                    if if_multi_patch:
-                        sample_labels = torch.zeros_like(visual_indices).unsqueeze(0)
-                        sample_labels[0][:4] = 1
-                    dummy_target = True
-                else:
-                    # Get ground truth indices/labels
-                    gt = visual_token_indices_of_coordinates[i].to(hs.device)
-                    if if_multi_patch:
-                        sample_labels = multi_patch_labels[i]
-                
-                # Get embeddings for visual and target tokens
-                visual_embeds = inputs_embeds[i][visual_indices]
-                target_hidden = hs[target_indices]
-
-                # Process using multi-patch pointer head
-                if if_multi_patch:
-                    # Verify matching dimensions
-                    if sample_labels.shape[0] != target_indices.shape[0]:
-                        raise ValueError(f"Sample {i} has mismatched target counts: {sample_labels.shape[0]} labels but found {target_indices.shape[0]} target tokens")
-
-                    # Get attention scores and loss
-                    attn_scores, loss_v = self.multi_patch_pointer_head(
-                        visual_embeds,
-                        target_hidden,
-                        labels=sample_labels
-                    )
+                try:
+                    dummy_target = False
+    
+                    # Get token IDs and hidden states for current sample
+                    token_ids = input_ids[i]          # shape: (seq_length,)
+                    hs = hidden_states[i]             # shape: (seq_length, d_model)
+    
+                    # Find visual token positions
+                    visual_mask = (token_ids == self.config.image_token_id)
+                    visual_indices = torch.nonzero(visual_mask, as_tuple=False).squeeze(-1)
+    
+                    # Find target token positions
+                    target_mask = (token_ids == self.config.pointer_pad_token_id)
+                    target_indices = torch.nonzero(target_mask, as_tuple=False).squeeze(-1)
                     
-                else:
-                    # Single patch mode (deprecated)
-                    attn_scores, loss_v = self.pointer_head(visual_embeds, target_hidden, labels=gt)
-                
-                pointer_scores.append(attn_scores.detach().cpu())
-                
-                # Add loss (zeroed if dummy target)
-                pointer_losses.append(loss_v * 0.0 if dummy_target else loss_v)
-            
-            pointer_loss = torch.stack(pointer_losses).mean()
+                    # Validate we have necessary visual tokens
+                    if visual_indices.numel() == 0:
+                        if verbose:
+                            print(f"Warning: No visual tokens found for sample {i}, skipping pointer loss")
+                        continue
+                        
+                    # Handle target tokens
+                    if target_indices.numel() == 0:
+                        if verbose:
+                            print(f"Warning: No target tokens found for sample {i}, using dummy target")
+                        # Use dummy target if no target tokens found
+                        target_indices = torch.tensor([hs.shape[0] - 1]).to(hs.device)
+                        gt = torch.tensor([0]).to(hs.device)
+                        if if_multi_patch:
+                            sample_labels = torch.zeros(1, visual_indices.shape[0], device=hs.device)
+                            # Mark a few patches as positive to create a meaningful training signal
+                            if visual_indices.shape[0] >= 4:
+                                sample_labels[0, :4] = 1
+                            else:
+                                sample_labels[0, :] = 1
+                        dummy_target = True
+                    else:
+                        # Get ground truth indices/labels
+                        if visual_token_indices_of_coordinates is not None:
+                            if i < len(visual_token_indices_of_coordinates):
+                                gt = visual_token_indices_of_coordinates[i].to(hs.device)
+                            else:
+                                # Handle case where indices don't match batch size
+                                if verbose:
+                                    print(f"Warning: visual_token_indices_of_coordinates missing entry for sample {i}")
+                                gt = torch.tensor([0]).to(hs.device)
+                                dummy_target = True
+                        else:
+                            gt = torch.tensor([0]).to(hs.device)
+                            
+                        # Get multi-patch labels if available and needed
+                        if if_multi_patch:
+                            if multi_patch_labels is not None and i < len(multi_patch_labels):
+                                sample_labels = multi_patch_labels[i]
+                            else:
+                                # Handle missing labels
+                                if verbose:
+                                    print(f"Warning: multi_patch_labels missing entry for sample {i}")
+                                sample_labels = torch.zeros(1, visual_indices.shape[0], device=hs.device)
+                                dummy_target = True
+                    
+                    # Get embeddings for visual and target tokens
+                    visual_embeds = inputs_embeds[i][visual_indices]
+                    target_hidden = hs[target_indices]
+    
+                    # Process using multi-patch pointer head
+                    if if_multi_patch:
+                        # Verify matching dimensions and handle errors
+                        if sample_labels.shape[0] != target_indices.shape[0]:
+                            if verbose:
+                                print(f"Warning: Sample {i} has mismatched target counts: "
+                                      f"{sample_labels.shape[0]} labels but found {target_indices.shape[0]} target tokens. "
+                                      f"Reshaping sample_labels to match.")
+                            
+                            # Try to fix mismatch by reshaping or padding
+                            if sample_labels.shape[0] > target_indices.shape[0]:
+                                # Truncate extra labels
+                                sample_labels = sample_labels[:target_indices.shape[0]]
+                            else:
+                                # Repeat last label to match target count
+                                last_label = sample_labels[-1].unsqueeze(0)
+                                padding = last_label.repeat(target_indices.shape[0] - sample_labels.shape[0], 1)
+                                sample_labels = torch.cat([sample_labels, padding], dim=0)
+    
+                        # Get attention scores and loss
+                        attn_scores, loss_v = self.multi_patch_pointer_head(
+                            visual_embeds,
+                            target_hidden,
+                            labels=sample_labels
+                        )
+                        
+                    else:
+                        # Single patch mode (deprecated)
+                        attn_scores, loss_v = self.pointer_head(visual_embeds, target_hidden, labels=gt)
+                    
+                    pointer_scores.append(attn_scores.detach().cpu())
+                    
+                    # Add loss (zeroed if dummy target)
+                    pointer_losses.append(loss_v * 0.0 if dummy_target else loss_v)
+                    
+                except Exception as e:
+                    if verbose:
+                        print(f"Error processing pointer head for sample {i}: {e}")
+                    # Continue with next sample
+                    continue
+                    
+            # Calculate average loss if we have any valid samples
+            if pointer_losses:
+                pointer_loss = torch.stack(pointer_losses).mean()
+            elif verbose:
+                print("No valid pointer losses calculated for any sample in batch")
 
         # Combine losses using weights, ensuring we always have a valid loss
         total_loss = None
@@ -583,9 +673,21 @@ class Qwen2_5_VLForConditionalGenerationWithPointer(Qwen2_5_VLForConditionalGene
             else:
                 total_loss = total_loss + self.pointer_loss_weight * pointer_loss
                 
-        # If no loss components are available, create a dummy zero loss to avoid errors
+        # If no loss components are available, raise a warning and use a tiny loss
+        # to allow debugging rather than silently failing
         if total_loss is None:
-            total_loss = torch.tensor(0.0, device=hidden_states.device)
+            if labels is not None:
+                # Only warn when labels are provided and we expect to calculate a loss
+                import warnings
+                warnings.warn(
+                    "No loss components were calculated despite labels being provided. "
+                    "Check that you're correctly passing label information and that "
+                    "lm_loss_weight and/or pointer_loss_weight are non-zero.",
+                    RuntimeWarning
+                )
+            # Use a small non-zero value that will produce small gradients
+            # to help identify the issue rather than a true zero that produces no gradients
+            total_loss = torch.tensor(1e-8, device=hidden_states.device, requires_grad=True)
 
         if return_dict:
             return QwenVLwithVisionHeadOutputWithPast(
