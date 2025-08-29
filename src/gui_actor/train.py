@@ -273,7 +273,7 @@ def train_gui_actor_on_fiftyone(
         logging_first_step=True,  # Log the first step to catch early OOMs
         
         # Offload optimizer state to CPU if requested
-        optim_args={"offload_optimizer": offload_to_cpu},
+        optim_args=f"offload_optimizer={str(offload_to_cpu).lower()}" if offload_to_cpu else None,
     )
     
     # Initialize trainer
