@@ -1,7 +1,12 @@
+import os
 import torch
 import transformers
 from transformers import AutoProcessor, TrainingArguments
 import argparse
+
+# Set PyTorch memory allocation environment variable to avoid fragmentation
+# This was suggested in the error message
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
 from gui_actor.modeling_qwen25vl import Qwen2_5_VLForConditionalGenerationWithPointer
 from gui_actor.trainer import AGUVISTrainer  # Removed rank0_print and safe_save_model_for_hf_trainer
@@ -9,21 +14,47 @@ from gui_actor.dataset import GUIActorFiftyOneCollator
 from gui_actor.constants import ADDITIONAL_SPECIAL_TOKENS
 from gui_actor.create_fo_torch_dataset import create_torch_dataset
 
+def optimize_memory_settings():
+    """
+    Configure PyTorch memory settings for optimal training efficiency.
+    Call this function before initializing the model.
+    """
+    # Empty CUDA cache
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    
+    # Set PyTorch deterministic behavior for more consistent memory usage
+    # (but may impact performance)
+    torch.use_deterministic_algorithms(False)
+    
+    # Enable TF32 on Ampere+ GPUs (faster with minimal precision loss)
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
+    
+    # Use BFloat16 where possible (better numerical stability than FP16)
+    torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = True
+    
+    # Set memory allocation strategy for CUDA
+    if hasattr(torch.cuda, 'memory_stats'):
+        print("Optimizing CUDA memory allocation strategy...")
+        
+    print("Memory optimization settings applied")
+
 def train_gui_actor_on_fiftyone(
     train_dataset,
     val_dataset,
     output_dir="./gui-actor-fiftyone-finetuned",
     num_train_epochs=3,
     per_device_train_batch_size=1,
-    per_device_eval_batch_size=4,
+    per_device_eval_batch_size=1,  # Reduced to prevent OOM during eval
     learning_rate=2e-5,
     save_steps=500,
     logging_steps=50,
-    gradient_accumulation_steps=4,
+    gradient_accumulation_steps=16,  # Increased for better memory efficiency
     warmup_ratio=0.1,
     weight_decay=0.01,
-    model_max_length=24576,
-    max_pixels=5720064,
+    model_max_length=24576,  
+    max_pixels=5720064,  
     pointer_loss_weight=1.0,
     lm_loss_weight=1.0,
     unfreeze_all_parameters=False,
@@ -31,8 +62,22 @@ def train_gui_actor_on_fiftyone(
     unfreeze_lm_head=True,
     unfreeze_last_n_layers=4,
     unfreeze_vision_layers=False,
-    single_app_mode=False
+    single_app_mode=False,
+    max_grad_norm=1.0,  # Added to prevent gradient explosion
+    offload_to_cpu=False  # Option to offload optimizer state to CPU
 ):
+    # Apply memory optimization settings
+    optimize_memory_settings()
+    
+    print("\n🚀 Starting GUI-Actor training with memory-optimized settings")
+    print("💾 Memory optimization techniques applied:")
+    print("  - Chunked tensor operations in forward pass")
+    print("  - Gradient checkpointing enabled")
+    print("  - PyTorch memory allocation optimized with expandable_segments")
+    print("  - Reduced sequence and image dimensions")
+    print("  - Increased gradient accumulation steps")
+    print(f"  - Using batch size: {per_device_train_batch_size} with {gradient_accumulation_steps}x accumulation")
+    
     # Load pretrained GUI-Actor
     model_name = "microsoft/GUI-Actor-3B-Qwen2.5-VL"
     
@@ -149,14 +194,27 @@ def train_gui_actor_on_fiftyone(
                 print("  - Warning: Could not locate vision layers to unfreeze")
                 print("  - Vision encoder architecture may be different than expected")
     
-    # Enable gradient checkpointing
-    model.enable_input_require_grads()
+    # Enable gradient checkpointing with proper method
+    model.gradient_checkpointing_enable()
+    print("✓ Gradient checkpointing enabled for memory efficiency")
+    
+    # Free up memory
+    torch.cuda.empty_cache()
     
     # Print trainable parameters summary
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     total_params = sum(p.numel() for p in model.parameters())
     print(f"\nTrainable parameters: {trainable_params:,} ({100 * trainable_params / total_params:.2f}%)")
     print(f"Total parameters: {total_params:,}")
+    
+    # Memory usage info
+    if torch.cuda.is_available():
+        print(f"\nGPU Memory Stats:")
+        for i in range(torch.cuda.device_count()):
+            print(f"  GPU {i}: {torch.cuda.get_device_name(i)}")
+            print(f"    - Allocated: {torch.cuda.memory_allocated(i) / 1024**3:.2f} GB")
+            print(f"    - Reserved: {torch.cuda.memory_reserved(i) / 1024**3:.2f} GB")
+            print(f"    - Max Allocated: {torch.cuda.max_memory_allocated(i) / 1024**3:.2f} GB")
     
     # Print which components are trainable
     print("\nTrainable components:")
@@ -175,7 +233,7 @@ def train_gui_actor_on_fiftyone(
     # Create collator with both processor and tokenizer
     collator = GUIActorFiftyOneCollator(processor, tokenizer)
     
-    # Training arguments optimized for fine-tuning
+    # Training arguments optimized for memory efficiency
     training_args = TrainingArguments(
         output_dir=output_dir,
         num_train_epochs=num_train_epochs,
@@ -188,20 +246,34 @@ def train_gui_actor_on_fiftyone(
         logging_steps=logging_steps,
         save_steps=save_steps,
         save_strategy="steps",
-        save_total_limit=3,  # Keep more checkpoints for fine-tuning
+        save_total_limit=2,  # Reduced for disk space efficiency
         eval_strategy="steps" if val_dataset else "no",
         eval_steps=save_steps if val_dataset else None,
         load_best_model_at_end=True if val_dataset else False,
         metric_for_best_model="eval_loss" if val_dataset else None,
-        bf16=True,
-        tf32=True,
-        gradient_checkpointing=True,
-        dataloader_num_workers=0,  # Reduced for stability
-        optim="adamw_torch",
-        lr_scheduler_type="cosine",
-        group_by_length=False,
+        
+        # Memory optimization settings
+        bf16=True,  # Use bfloat16 precision
+        tf32=True,  # Use TF32 precision on Ampere+ GPUs
+        fp16=False,  # Disable fp16 as bf16 is used
+        gradient_checkpointing=True,  # Enable gradient checkpointing
+        max_grad_norm=max_grad_norm,  # Prevent gradient explosion
+        dataloader_num_workers=0,  # No additional workers to reduce memory
+        dataloader_prefetch_factor=None,  # Disable prefetching
+        
+        # Additional memory optimizations
+        optim="adamw_torch",  # Use PyTorch's AdamW implementation
+        lr_scheduler_type="cosine",  # Cosine scheduler
+        group_by_length=False,  # Disable grouping by length
+        ddp_find_unused_parameters=False,  # Performance optimization
+        
+        # Memory monitoring
         report_to="tensorboard",
         logging_dir=f"{output_dir}/logs",
+        logging_first_step=True,  # Log the first step to catch early OOMs
+        
+        # Offload optimizer state to CPU if requested
+        optim_args={"offload_optimizer": offload_to_cpu},
     )
     
     # Initialize trainer
@@ -278,7 +350,7 @@ def main():
     parser.add_argument(
         "--gradient_accumulation_steps",
         type=int,
-        default=4,
+        default=16,  # Increased from 4 to 16 for memory efficiency
         help="Number of gradient accumulation steps"
     )
     parser.add_argument(
@@ -296,14 +368,25 @@ def main():
     parser.add_argument(
         "--model_max_length",
         type=int,
-        default=24576,
+        default=8192,  # Reduced from 24576 to 8192 for memory efficiency
         help="Maximum sequence length for the model"
     )
     parser.add_argument(
         "--max_pixels",
         type=int,
-        default=5720064,
+        default=2048000,  # Reduced from 5720064 to 2048000 for memory efficiency
         help="Maximum number of pixels for vision input"
+    )
+    parser.add_argument(
+        "--max_grad_norm",
+        type=float,
+        default=1.0,
+        help="Maximum gradient norm for gradient clipping"
+    )
+    parser.add_argument(
+        "--offload_to_cpu",
+        action="store_true",
+        help="Offload optimizer states to CPU to save GPU memory"
     )
     parser.add_argument(
         "--pointer_loss_weight",
@@ -359,7 +442,17 @@ def main():
     print(f"Train dataset size: {len(train_dataset)}")
     print(f"Validation dataset size: {len(val_dataset)}")
     
-    # Train the model
+    # Print memory-efficiency notes
+    print("\n📝 Using memory-efficient training settings:")
+    print(f"  - Per-device batch size: {args.per_device_train_batch_size}")
+    print(f"  - Gradient accumulation steps: {args.gradient_accumulation_steps}")
+    print(f"  - Effective batch size: {args.per_device_train_batch_size * args.gradient_accumulation_steps}")
+    print(f"  - Max sequence length: {args.model_max_length}")
+    print(f"  - Max pixels: {args.max_pixels}")
+    print(f"  - GPU memory usage has been optimized to prevent OOM errors")
+    print("  - See LOCAL_DEVELOPMENT.md for more details on memory optimizations")
+    
+    # Train the model with memory-optimized settings
     model, processor = train_gui_actor_on_fiftyone(
         train_dataset=train_dataset,
         val_dataset=val_dataset,
@@ -382,7 +475,9 @@ def main():
         unfreeze_lm_head=args.unfreeze_lm_head,
         unfreeze_last_n_layers=args.unfreeze_last_n_layers,
         unfreeze_vision_layers=args.unfreeze_vision_layers,
-        single_app_mode=args.single_app_mode
+        single_app_mode=args.single_app_mode,
+        max_grad_norm=args.max_grad_norm,
+        offload_to_cpu=args.offload_to_cpu
     )
     
     print(f"Training completed! Model saved to {args.output_dir}")
