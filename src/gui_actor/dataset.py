@@ -273,7 +273,7 @@ class GUIActorFiftyOneCollator:
         for item in batch:
             # Check if message_payload exists and has content
             if 'message_payload' not in item or not item['message_payload']:
-                print(f"Warning: Skipping sample with missing or empty message_payload. Item keys: {item.keys()}")
+                # Skip silently - this can happen with empty batches in multi-worker scenarios
                 continue
                 
             # With the flattened dataset, message_payload is directly the list of messages
