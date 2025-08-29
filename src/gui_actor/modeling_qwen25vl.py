@@ -162,12 +162,45 @@ class Qwen2_5_VLForConditionalGenerationWithPointer(Qwen2_5_VLForConditionalGene
         self.lm_loss_weight = kwargs.get("lm_loss_weight", 1.0)
         # Initialize rope_deltas attribute to avoid AttributeError
         self.rope_deltas = None
+        # Initialize gradient checkpointing settings
+        self._use_gradient_checkpointing = False
         self.post_init()
     
     def reset_loss_weights(self, pointer_loss_weight, lm_loss_weight):
         """Update the weights used for combining losses"""
         self.pointer_loss_weight = pointer_loss_weight
         self.lm_loss_weight = lm_loss_weight
+        
+    def gradient_checkpointing_enable(self, gradient_checkpointing_kwargs=None):
+        """
+        Activates gradient checkpointing for the model.
+        
+        This significantly reduces memory usage during training at the cost of some
+        additional computation to recompute intermediate activations.
+        """
+        if not self._use_gradient_checkpointing:
+            self.model.gradient_checkpointing_enable(gradient_checkpointing_kwargs)
+            # Enable requires_grad for input activations if gradient checkpointing is enabled
+            self.enable_input_require_grads()
+            self._use_gradient_checkpointing = True
+    
+    def gradient_checkpointing_disable(self):
+        """Disables gradient checkpointing for the model."""
+        if self._use_gradient_checkpointing:
+            self.model.gradient_checkpointing_disable()
+            self._use_gradient_checkpointing = False
+            
+    def enable_input_require_grads(self):
+        """
+        Enables the computation of gradients with respect to input embeddings.
+        
+        This is needed when using gradient checkpointing with the huggingface
+        Trainer class and for efficient memory usage during training.
+        """
+        def make_inputs_require_grad(module, input, output):
+            output.requires_grad_(True)
+            
+        self.get_input_embeddings().register_forward_hook(make_inputs_require_grad)
 
     def get_rope_index(
         self,
@@ -513,20 +546,43 @@ class Qwen2_5_VLForConditionalGenerationWithPointer(Qwen2_5_VLForConditionalGene
         lm_loss = None
         if labels is not None:
             if self.lm_loss_weight > 0:
-                # Upcast to float32 for loss computation
-                logits = logits.float()
-                # Shift logits and labels for next-token prediction
-                shift_logits = logits[..., :-1, :].contiguous()
-                shift_labels = labels[..., 1:].contiguous()
+                # Memory optimization: avoid full float32 conversion of the entire tensor
+                # Use chunking to reduce memory usage
+                batch_size, seq_len, vocab_size = logits.shape
                 
                 # Check if we have valid label values (not all IGNORE_INDEX)
+                shift_labels = labels[..., 1:].contiguous()
                 if (shift_labels != -100).sum() > 0:
-                    # Compute cross entropy loss
+                    # Process in smaller chunks to avoid OOM
                     loss_fct = nn.CrossEntropyLoss()
-                    shift_logits = shift_logits.view(-1, self.config.vocab_size)
-                    shift_labels = shift_labels.view(-1)
-                    shift_labels = shift_labels.to(shift_logits.device)
-                    lm_loss = loss_fct(shift_logits, shift_labels)
+                    chunk_size = min(512, seq_len-1)  # Process in chunks of 512 tokens
+                    total_loss = 0.0
+                    total_tokens = 0
+                    
+                    for i in range(0, seq_len-1, chunk_size):
+                        end_idx = min(i + chunk_size, seq_len-1)
+                        # Process a slice of the sequence
+                        chunk_logits = logits[..., i:end_idx, :].float()  # Convert only the chunk to float32
+                        chunk_shift_logits = chunk_logits.contiguous().view(-1, self.config.vocab_size)
+                        chunk_shift_labels = shift_labels[..., i:end_idx].contiguous().view(-1)
+                        chunk_shift_labels = chunk_shift_labels.to(chunk_shift_logits.device)
+                        
+                        # Skip computation for padding tokens
+                        valid_mask = chunk_shift_labels != -100
+                        if valid_mask.sum() > 0:
+                            valid_logits = chunk_shift_logits[valid_mask]
+                            valid_labels = chunk_shift_labels[valid_mask]
+                            chunk_loss = loss_fct(valid_logits, valid_labels)
+                            
+                            # Weighted accumulation
+                            total_loss += chunk_loss * valid_mask.sum()
+                            total_tokens += valid_mask.sum()
+                    
+                    # Compute final average loss
+                    if total_tokens > 0:
+                        lm_loss = total_loss / total_tokens
+                    else:
+                        lm_loss = torch.tensor(0.0, device=logits.device, requires_grad=True)
                 else:
                     if verbose:
                         print("Warning: All labels are IGNORE_INDEX (-100), skipping language modeling loss")
