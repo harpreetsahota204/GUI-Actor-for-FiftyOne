@@ -22,8 +22,9 @@ class QwenVLwithVisionHeadOutputWithPast(Qwen2_5_VLCausalLMOutputWithPast):
         past_key_values, hidden_states, attentions, rope_deltas:
             Same as parent class.
     """
-    def __init__(self, lm_loss=None, pointer_loss=None, pointer_scores=None, *args, **kwargs):
+    def __init__(self, loss=None, lm_loss=None, pointer_loss=None, pointer_scores=None, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        self.loss = loss  # Make sure loss is included in the output class
         self.lm_loss = lm_loss
         self.pointer_loss = pointer_loss 
         self.pointer_scores = pointer_scores
@@ -159,6 +160,8 @@ class Qwen2_5_VLForConditionalGenerationWithPointer(Qwen2_5_VLForConditionalGene
         # Get loss weights from kwargs or use defaults
         self.pointer_loss_weight = kwargs.get("pointer_loss_weight", 1.0)
         self.lm_loss_weight = kwargs.get("lm_loss_weight", 1.0)
+        # Initialize rope_deltas attribute to avoid AttributeError
+        self.rope_deltas = None
         self.post_init()
     
     def reset_loss_weights(self, pointer_loss_weight, lm_loss_weight):
@@ -568,20 +571,28 @@ class Qwen2_5_VLForConditionalGenerationWithPointer(Qwen2_5_VLForConditionalGene
             
             pointer_loss = torch.stack(pointer_losses).mean()
 
-        # Combine losses using weights
-        if lm_loss is None:
-            total_loss = pointer_loss
-        elif pointer_loss is None:
-            total_loss = lm_loss
-        else:
-            total_loss = self.lm_loss_weight * lm_loss + self.pointer_loss_weight * pointer_loss
+        # Combine losses using weights, ensuring we always have a valid loss
+        total_loss = None
+        
+        if lm_loss is not None and self.lm_loss_weight > 0:
+            total_loss = self.lm_loss_weight * lm_loss
+            
+        if pointer_loss is not None and self.pointer_loss_weight > 0:
+            if total_loss is None:
+                total_loss = self.pointer_loss_weight * pointer_loss
+            else:
+                total_loss = total_loss + self.pointer_loss_weight * pointer_loss
+                
+        # If no loss components are available, create a dummy zero loss to avoid errors
+        if total_loss is None:
+            total_loss = torch.tensor(0.0, device=hidden_states.device)
 
         if return_dict:
             return QwenVLwithVisionHeadOutputWithPast(
+                loss=total_loss,  # Ensure loss is always set
                 lm_loss=lm_loss,
                 pointer_loss=pointer_loss,
                 pointer_scores=pointer_scores,
-                loss=total_loss,
                 logits=logits,
                 past_key_values=outputs.past_key_values,
                 hidden_states=outputs.hidden_states,
@@ -591,8 +602,7 @@ class Qwen2_5_VLForConditionalGenerationWithPointer(Qwen2_5_VLForConditionalGene
         else:
             # Return appropriate tuple based on whether labels were provided
             if labels is not None:
-                output = (lm_loss, pointer_loss, logits, pointer_scores,) + outputs[1:]
-                print(f"returning: total_loss, logits, pointer_scores, ...")
-                return (total_loss,) + output if total_loss is not None else output
+                # Make sure loss is first in the tuple to match HF Trainer expectations
+                return (total_loss, logits) + outputs[1:]
             else:
                 return outputs
