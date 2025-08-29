@@ -14,13 +14,24 @@ def train_gui_actor_on_fiftyone(
     val_dataset,
     output_dir="./gui-actor-fiftyone-finetuned",
     num_train_epochs=3,
-    per_device_train_batch_size=2,
+    per_device_train_batch_size=1,
+    per_device_eval_batch_size=4,
     learning_rate=2e-5,
     save_steps=500,
     logging_steps=50,
     gradient_accumulation_steps=4,
-    warmup_steps=100,
-    num_unfrozen_layers=6
+    warmup_ratio=0.1,
+    weight_decay=0.01,
+    model_max_length=24576,
+    max_pixels=5720064,
+    pointer_loss_weight=1.0,
+    lm_loss_weight=1.0,
+    unfreeze_all_parameters=False,
+    unfreeze_pointer_head=True,
+    unfreeze_lm_head=True,
+    unfreeze_last_n_layers=4,
+    unfreeze_vision_layers=False,
+    single_app_mode=False
 ):
     # Load pretrained GUI-Actor
     model_name = "microsoft/GUI-Actor-3B-Qwen2.5-VL"
@@ -32,9 +43,14 @@ def train_gui_actor_on_fiftyone(
         device_map="auto"
     )
     
-    # Set loss weights for your use case
-    model.reset_loss_weights(pointer_loss_weight=0.5, lm_loss_weight=1.0)
+    # Set loss weights to match original recipe
+    model.reset_loss_weights(pointer_loss_weight=pointer_loss_weight, lm_loss_weight=lm_loss_weight)
     model.config.use_cache = False
+    
+    # Set model max length and max pixels to match original
+    model.config.max_position_embeddings = model_max_length
+    if hasattr(model.config, 'max_pixels'):
+        model.config.max_pixels = max_pixels
     
     # Load processor
     processor = AutoProcessor.from_pretrained(model_name)
@@ -44,47 +60,135 @@ def train_gui_actor_on_fiftyone(
     tokenizer.add_special_tokens({"additional_special_tokens": ADDITIONAL_SPECIAL_TOKENS})
     model.resize_token_embeddings(len(tokenizer))
     
-    # Freeze all parameters first
-    for p in model.parameters():
-        p.requires_grad = False
+    # Apply single-app mode overrides for aggressive fine-tuning
+    if single_app_mode:
+        print("🎯 SINGLE-APP MODE: Applying aggressive fine-tuning settings...")
+        unfreeze_vision_layers = True
+        unfreeze_last_n_layers = max(8, unfreeze_last_n_layers)  # At least 8 layers
+        print(f"   - Vision layers will be unfrozen")
+        print(f"   - Unfreezing {unfreeze_last_n_layers} transformer layers")
+        print(f"   - This will maximize adaptation to your specific application")
     
-    # Unfreeze strategy: lm_head + last N transformer layers
-    print("Unfreezing lm_head...")
-    for p in model.lm_head.parameters():
-        p.requires_grad = True
+    # Fine-tuning parameter unfreezing strategy
+    if unfreeze_all_parameters:
+        print("WARNING: Unfreezing all parameters - this may cause overfitting on small datasets!")
+        for p in model.parameters():
+            p.requires_grad = True
+    else:
+        # Selective unfreezing strategy for fine-tuning
+        print("Using selective unfreezing strategy for fine-tuning...")
         
-    print(f"Unfreezing last {num_unfrozen_layers} transformer layers...")
-    for p in model.language_model.layers[-num_unfrozen_layers:].parameters():
-        p.requires_grad = True
+        # Freeze all parameters first
+        for p in model.parameters():
+            p.requires_grad = False
+        
+        # Unfreeze task-specific heads
+        if unfreeze_lm_head:
+            print("Unfreezing language modeling head...")
+            for p in model.lm_head.parameters():
+                p.requires_grad = True
+        
+        if unfreeze_pointer_head and hasattr(model, 'pointer_head'):
+            print("Unfreezing pointer head...")
+            for p in model.pointer_head.parameters():
+                p.requires_grad = True
+        
+        # Unfreeze last N transformer layers for adaptation
+        if unfreeze_last_n_layers > 0:
+            print(f"Unfreezing last {unfreeze_last_n_layers} transformer layers...")
+            total_layers = len(model.language_model.layers)
+            layers_to_unfreeze = model.language_model.layers[-unfreeze_last_n_layers:]
+            for layer in layers_to_unfreeze:
+                for p in layer.parameters():
+                    p.requires_grad = True
+        
+        # Unfreeze vision layers for single-application fine-tuning
+        if unfreeze_vision_layers:
+            print("Unfreezing vision layers for single-application adaptation...")
+            
+            # Try different vision encoder architectures
+            vision_unfrozen = False
+            
+            # For Qwen2.5-VL vision encoder
+            if hasattr(model, 'visual') and hasattr(model.visual, 'transformer'):
+                print("  - Unfreezing Qwen2.5-VL vision transformer layers...")
+                # Unfreeze last 25% of vision layers for single-app mode
+                total_vision_layers = len(model.visual.transformer.resblocks)
+                layers_to_unfreeze = max(2, total_vision_layers // 4)
+                for layer in model.visual.transformer.resblocks[-layers_to_unfreeze:]:
+                    for p in layer.parameters():
+                        p.requires_grad = True
+                print(f"    Unfroze last {layers_to_unfreeze}/{total_vision_layers} vision layers")
+                vision_unfrozen = True
+            
+            # Alternative: if vision encoder is structured differently
+            elif hasattr(model, 'vision_model'):
+                print("  - Unfreezing alternative vision model layers...")
+                if hasattr(model.vision_model, 'encoder') and hasattr(model.vision_model.encoder, 'layers'):
+                    total_layers = len(model.vision_model.encoder.layers)
+                    layers_to_unfreeze = max(2, total_layers // 4)
+                    for layer in model.vision_model.encoder.layers[-layers_to_unfreeze:]:
+                        for p in layer.parameters():
+                            p.requires_grad = True
+                    print(f"    Unfroze last {layers_to_unfreeze}/{total_layers} vision layers")
+                    vision_unfrozen = True
+            
+            if not vision_unfrozen:
+                print("  - Warning: Could not locate vision layers to unfreeze")
+                print("  - Vision encoder architecture may be different than expected")
     
     # Enable gradient checkpointing
     model.enable_input_require_grads()
     
+    # Print trainable parameters summary
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    total_params = sum(p.numel() for p in model.parameters())
+    print(f"\nTrainable parameters: {trainable_params:,} ({100 * trainable_params / total_params:.2f}%)")
+    print(f"Total parameters: {total_params:,}")
+    
+    # Print which components are trainable
+    print("\nTrainable components:")
+    if any(p.requires_grad for p in model.lm_head.parameters()):
+        print("- Language modeling head")
+    if hasattr(model, 'pointer_head') and any(p.requires_grad for p in model.pointer_head.parameters()):
+        print("- Pointer head")
+    
+    trainable_layers = []
+    for i, layer in enumerate(model.language_model.layers):
+        if any(p.requires_grad for p in layer.parameters()):
+            trainable_layers.append(str(i))
+    if trainable_layers:
+        print(f"- Transformer layers: {', '.join(trainable_layers)}")
+    
     # Create collator with both processor and tokenizer
     collator = GUIActorFiftyOneCollator(processor, tokenizer)
     
-    # Training arguments
+    # Training arguments optimized for fine-tuning
     training_args = TrainingArguments(
         output_dir=output_dir,
         num_train_epochs=num_train_epochs,
         per_device_train_batch_size=per_device_train_batch_size,
-        per_device_eval_batch_size=1,
+        per_device_eval_batch_size=per_device_eval_batch_size,
         gradient_accumulation_steps=gradient_accumulation_steps,
         learning_rate=learning_rate,
-        weight_decay=0.01,
-        warmup_steps=warmup_steps,
+        weight_decay=weight_decay,
+        warmup_ratio=warmup_ratio,
         logging_steps=logging_steps,
         save_steps=save_steps,
-        save_total_limit=2,
-        bf16=True,
-        gradient_checkpointing=True,
-        dataloader_num_workers=4,
-        optim="adamw_torch",
-        lr_scheduler_type="cosine",
+        save_strategy="steps",
+        save_total_limit=3,  # Keep more checkpoints for fine-tuning
         eval_strategy="steps" if val_dataset else "no",
         eval_steps=save_steps if val_dataset else None,
         load_best_model_at_end=True if val_dataset else False,
-        report_to="tensorboard",  # Add tensorboard logging
+        metric_for_best_model="eval_loss" if val_dataset else None,
+        bf16=True,
+        tf32=True,
+        gradient_checkpointing=True,
+        dataloader_num_workers=0,  # Reduced for stability
+        optim="adamw_torch",
+        lr_scheduler_type="cosine",
+        group_by_length=False,
+        report_to="tensorboard",
         logging_dir=f"{output_dir}/logs",
     )
     
@@ -132,8 +236,14 @@ def main():
     parser.add_argument(
         "--per_device_train_batch_size",
         type=int,
-        default=2,
+        default=1,
         help="Training batch size per device"
+    )
+    parser.add_argument(
+        "--per_device_eval_batch_size",
+        type=int,
+        default=4,
+        help="Evaluation batch size per device"
     )
     parser.add_argument(
         "--learning_rate",
@@ -160,16 +270,73 @@ def main():
         help="Number of gradient accumulation steps"
     )
     parser.add_argument(
-        "--warmup_steps",
-        type=int,
-        default=100,
-        help="Number of warmup steps"
+        "--warmup_ratio",
+        type=float,
+        default=0.1,
+        help="Warmup ratio of total training steps"
     )
     parser.add_argument(
-        "--num_unfrozen_layers",
+        "--weight_decay",
+        type=float,
+        default=0.01,
+        help="Weight decay coefficient"
+    )
+    parser.add_argument(
+        "--model_max_length",
         type=int,
-        default=6,
-        help="Number of transformer layers to unfreeze from the end"
+        default=24576,
+        help="Maximum sequence length for the model"
+    )
+    parser.add_argument(
+        "--max_pixels",
+        type=int,
+        default=5720064,
+        help="Maximum number of pixels for vision input"
+    )
+    parser.add_argument(
+        "--pointer_loss_weight",
+        type=float,
+        default=1.0,
+        help="Weight for pointer loss"
+    )
+    parser.add_argument(
+        "--lm_loss_weight",
+        type=float,
+        default=1.0,
+        help="Weight for language modeling loss"
+    )
+    parser.add_argument(
+        "--unfreeze_all_parameters",
+        action="store_true",
+        help="Unfreeze all model parameters for training (not recommended for fine-tuning)"
+    )
+    parser.add_argument(
+        "--unfreeze_pointer_head",
+        action="store_true",
+        default=True,
+        help="Unfreeze pointer head for training"
+    )
+    parser.add_argument(
+        "--unfreeze_lm_head",
+        action="store_true", 
+        default=True,
+        help="Unfreeze language modeling head for training"
+    )
+    parser.add_argument(
+        "--unfreeze_last_n_layers",
+        type=int,
+        default=4,
+        help="Number of last transformer layers to unfreeze (0 to disable)"
+    )
+    parser.add_argument(
+        "--unfreeze_vision_layers",
+        action="store_true",
+        help="Unfreeze some vision layers (recommended for single-application fine-tuning)"
+    )
+    parser.add_argument(
+        "--single_app_mode",
+        action="store_true",
+        help="Enable aggressive fine-tuning for single application (unfreezes more components)"
     )
     
     args = parser.parse_args()
@@ -187,12 +354,23 @@ def main():
         output_dir=args.output_dir,
         num_train_epochs=args.num_train_epochs,
         per_device_train_batch_size=args.per_device_train_batch_size,
+        per_device_eval_batch_size=args.per_device_eval_batch_size,
         learning_rate=args.learning_rate,
         save_steps=args.save_steps,
         logging_steps=args.logging_steps,
         gradient_accumulation_steps=args.gradient_accumulation_steps,
-        warmup_steps=args.warmup_steps,
-        num_unfrozen_layers=args.num_unfrozen_layers
+        warmup_ratio=args.warmup_ratio,
+        weight_decay=args.weight_decay,
+        model_max_length=args.model_max_length,
+        max_pixels=args.max_pixels,
+        pointer_loss_weight=args.pointer_loss_weight,
+        lm_loss_weight=args.lm_loss_weight,
+        unfreeze_all_parameters=args.unfreeze_all_parameters,
+        unfreeze_pointer_head=args.unfreeze_pointer_head,
+        unfreeze_lm_head=args.unfreeze_lm_head,
+        unfreeze_last_n_layers=args.unfreeze_last_n_layers,
+        unfreeze_vision_layers=args.unfreeze_vision_layers,
+        single_app_mode=args.single_app_mode
     )
     
     print(f"Training completed! Model saved to {args.output_dir}")
