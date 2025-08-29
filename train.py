@@ -109,8 +109,20 @@ def train_gui_actor_on_fiftyone(
             # Try different vision encoder architectures
             vision_unfrozen = False
             
-            # For Qwen2.5-VL vision encoder
-            if hasattr(model, 'visual') and hasattr(model.visual, 'transformer'):
+            # For Qwen2.5-VL vision encoder with blocks structure
+            if hasattr(model, 'visual') and hasattr(model.visual, 'blocks'):
+                print("  - Unfreezing Qwen2.5-VL vision blocks...")
+                # Unfreeze last 25% of vision blocks for single-app mode
+                total_vision_blocks = len(model.visual.blocks)
+                blocks_to_unfreeze = max(2, total_vision_blocks // 4)
+                for block in model.visual.blocks[-blocks_to_unfreeze:]:
+                    for p in block.parameters():
+                        p.requires_grad = True
+                print(f"    Unfroze last {blocks_to_unfreeze}/{total_vision_blocks} vision blocks")
+                vision_unfrozen = True
+            
+            # Fallback: For other Qwen2.5-VL vision encoder structures
+            elif hasattr(model, 'visual') and hasattr(model.visual, 'transformer'):
                 print("  - Unfreezing Qwen2.5-VL vision transformer layers...")
                 # Unfreeze last 25% of vision layers for single-app mode
                 total_vision_layers = len(model.visual.transformer.resblocks)
