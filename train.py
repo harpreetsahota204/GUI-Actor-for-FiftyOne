@@ -4,7 +4,7 @@ from transformers import AutoProcessor, TrainingArguments
 import argparse
 
 from gui_actor.modeling_qwen25vl import Qwen2_5_VLForConditionalGenerationWithPointer
-from gui_actor.trainer import AGUVISTrainer, rank0_print, safe_save_model_for_hf_trainer
+from gui_actor.trainer import AGUVISTrainer  # Removed rank0_print and safe_save_model_for_hf_trainer
 from gui_actor.dataset import GUIActorFiftyOneCollator
 from gui_actor.constants import ADDITIONAL_SPECIAL_TOKENS
 from gui_actor.create_fo_torch_dataset import create_torch_dataset
@@ -49,11 +49,11 @@ def train_gui_actor_on_fiftyone(
         p.requires_grad = False
     
     # Unfreeze strategy: lm_head + last N transformer layers
-    rank0_print("Unfreezing lm_head...")
+    print("Unfreezing lm_head...")
     for p in model.lm_head.parameters():
         p.requires_grad = True
         
-    rank0_print(f"Unfreezing last {num_unfrozen_layers} transformer layers...")
+    print(f"Unfreezing last {num_unfrozen_layers} transformer layers...")
     for p in model.language_model.layers[-num_unfrozen_layers:].parameters():
         p.requires_grad = True
     
@@ -101,10 +101,11 @@ def train_gui_actor_on_fiftyone(
     # Train
     trainer.train()
     
-    # Save final model
+    # Save final model - use standard save_model method
     model.config.use_cache = True
-    safe_save_model_for_hf_trainer(trainer=trainer, output_dir=output_dir)
-    rank0_print(f"Model saved to {output_dir}")
+    trainer.save_model(output_dir)
+    processor.save_pretrained(output_dir)
+    print(f"Model saved to {output_dir}")
     
     return model, processor
 
