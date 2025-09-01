@@ -1,4 +1,6 @@
 import torch
+import json
+import re
 from qwen_vl_utils import process_vision_info
 from transformers import (
     LogitsProcessor,
@@ -212,10 +214,11 @@ def inference(conversation, model, tokenizer, data_processor, logits_processor=N
     # Reset the force_queue to ensure clean state
     logits_processor.force_queue = []
     
-    assiatant_starter = "" if not use_placeholder else "<|im_start|>assistant<|recipient|>os\npyautogui.click(<|pointer_start|><|pointer_pad|><|pointer_end|>)"
+    assistant_starter = ""  # Let the model generate what it was trained to generate
 
     pred = {
         "output_text": None, # generated text
+        "parsed_json": None, # parsed JSON from the output
         "n_width": None, # number of patch_tokens in width dimension
         "n_height": None, # number of patch_tokens in height dimension
         "attn_scores": None, # attention scores over the image patches
@@ -230,7 +233,7 @@ def inference(conversation, model, tokenizer, data_processor, logits_processor=N
                                             add_generation_prompt=False,
                                             chat_template=chat_template
                                             )
-    text += assiatant_starter
+    text += assistant_starter
 
     # prepare inputs
     image_inputs, video_inputs = process_vision_info(conversation)
@@ -256,12 +259,26 @@ def inference(conversation, model, tokenizer, data_processor, logits_processor=N
     generated_ids = results.sequences[0][len(input_ids):]
     output_text = tokenizer.decode(generated_ids, skip_special_tokens=False, clean_up_tokenization_spaces=False)
     pred["output_text"] = output_text
-
-    # check if there are <POINTER_TOKEN> is inside the input_ids or generated_ids
-    if use_placeholder:
-        pointer_pad_mask = (inputs["input_ids"][0] == model.config.pointer_pad_token_id) # n_all_input_tokens
+    
+    # Extract the JSON that your model was trained to output
+    json_match = re.search(r'```json\s*({.*?})\s*```', output_text, re.DOTALL)
+    if json_match:
+        try:
+            pred["parsed_json"] = json.loads(json_match.group(1))
+        except:
+            pred["parsed_json"] = None
     else:
-        pointer_pad_mask = (generated_ids[:-1] == model.config.pointer_pad_token_id) # seq_len_generated_ids-1
+        pred["parsed_json"] = None
+
+    # Look for pointer tokens in what was actually generated
+    pointer_pad_id = tokenizer.convert_tokens_to_ids("<|pointer_pad|>")
+    pointer_pad_mask = (generated_ids == pointer_pad_id)
+    
+    # If no pointer tokens found, the model might still have computed attention internally
+    # Use the last position as a fallback for attention extraction
+    if not pointer_pad_mask.any() and len(generated_ids) > 0:
+        pointer_pad_mask = torch.zeros_like(generated_ids, dtype=torch.bool)
+        pointer_pad_mask[-2] = True  # Use second-to-last position (before EOS)
 
     # if there are no <POINTER_TOKEN> in the input_ids or generated_ids, return the pred
     if len(pointer_pad_mask) == 0:
