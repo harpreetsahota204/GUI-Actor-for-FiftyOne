@@ -6,26 +6,23 @@ import fiftyone as fo
 from fiftyone.utils.torch import GetItem
 import fiftyone.utils.random as four
 
-
 KP_SYSTEM_MESSAGE = """You are a GUI Agent specialized in interacting with the FiftyOne application. Given a screenshot of the current FiftyOne GUI and a human instruction, your task is to locate the screen element that corresponds to the instruction.
 
-You should output a response indicating the element type to interact with, action to be taken on that element, correct position of the action, and any additional metadata. 
+You should output a response that:
+1. Describes the action you will take in natural language
+2. Provides the exact coordinates where you will interact
+3. Includes a valid JSON object with the action details, element information, interaction points, and any relevant metadata
 
-Your response must be a valid JSON wrapped exactly this format:
-
-```json
-{{"element_info": {element_info}, "label": "{label}", "points": {points}, "custom_metadata": {custom_metadata}}}
-```"""
+The JSON should contain fields for action, element_info, points (as coordinate arrays), and custom_metadata."""
 
 BB_SYSTEM_MESSAGE = """You are a GUI Agent specialized in interacting with the FiftyOne application. Given a screenshot of the current FiftyOne GUI and a human instruction, your task is to locate the screen element that corresponds to the instruction.
 
-You should output a response indicating the element type to interact with, action to be taken on that element, correct position of the action, and any additional metadata. 
+You should output a response that:
+1. Describes the action you will take in natural language
+2. Provides the bounding box coordinates for the interaction region
+3. Includes a valid JSON object with the action details, element information, bounding box coordinates, and any relevant metadata
 
-Your response must be a valid JSON wrapped exactly this format:
-
-```json
-{{"element_info": {element_info}, "label": "{label}", "bounding_box": {bounding_box}, "custom_metadata": {custom_metadata}}}
-```"""
+The JSON should contain fields for action, element_info, bounding_box (as [x_min, y_min, x_max, y_max]), and custom_metadata."""
 
 def add_message_payload_to_dataset(dataset):
     """
