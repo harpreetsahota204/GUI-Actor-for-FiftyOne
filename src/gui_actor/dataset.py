@@ -28,64 +28,73 @@ except ImportError:
 
 def reformat_coordinates(text):
     """
-    Process text to extract and standardize coordinate references, replacing them with special tokens.
+    Extract coordinates from JSON structure and insert pointer tokens.
     
-    This function:
-    1. Finds all coordinate patterns in the text (both single points and coordinate pairs)
-    2. Extracts and adjusts coordinates to be within valid bounds
-    3. Replaces coordinate patterns with special pointer tokens
-    
-    Args:
-        text (str): Input text containing coordinate references
-        
-    Returns:
-        tuple: (processed_text, coordinates) where:
-            - processed_text (str): Text with coordinates replaced by special tokens
-            - coordinates (list): List of extracted (x,y) coordinate tuples
+    This approach assumes coordinates only appear in JSON, not in natural language.
+    The pointer tokens get inserted to mark where visual grounding should occur.
     """
-    # Small value to ensure coordinates stay within [0,1] bounds
+    import json
+    import re
+    
     epsilon = 0.001
     
     def adjust_coord(c):
-        """Adjust coordinate to avoid exact 0 or 1 values for numerical stability"""
+        """Ensure coordinates stay within valid [0,1] bounds"""
         if abs(c) < epsilon:
-            return epsilon  # Avoid exact 0
+            return epsilon
         elif abs(c - 1) < epsilon:
-            return 1 - epsilon  # Avoid exact 1
+            return 1 - epsilon
         return c
-
-    # Store all coordinate pattern matches with their positions for ordered processing
-    all_matches = []
-    for pattern in ACTION_PATTENS_XY:
-        matches = list(re.finditer(pattern, text))
-        for match in matches:
-            all_matches.append((match.start(), match.groups()))
     
-    # Sort matches by position to maintain order
-    all_matches.sort(key=lambda x: x[0])
-    
-    # Extract and process coordinates from matches
     coordinates = []
-    for _, groups in all_matches:
-        if len(groups) == 2:  # Single point pattern (x,y)
-            x = adjust_coord(float(groups[0]))
-            y = adjust_coord(float(groups[1]))
-            coordinates.append((x, y))
-        elif len(groups) == 4:  # Two point pattern (x1,y1,x2,y2)
-            x1 = adjust_coord(float(groups[0]))
-            y1 = adjust_coord(float(groups[1]))
-            x2 = adjust_coord(float(groups[2]))
-            y2 = adjust_coord(float(groups[3]))
-            coordinates.append((x1, y1))
-            coordinates.append((x2, y2))
     
-    # Replace coordinate patterns with special pointer token sequences
-    for pattern in ACTION_PATTENS_XY:
-        if pattern == ACTION_PATTENS_XY[0]:  # Single point pattern
-            target_text = f"{DEFAULT_POINTER_START_TOKEN}{DEFAULT_POINTER_PAD_TOKEN}{DEFAULT_POINTER_END_TOKEN}"
-        else:  # Two point pattern
-            target_text = f"{DEFAULT_POINTER_START_TOKEN}{DEFAULT_POINTER_PAD_TOKEN}{DEFAULT_POINTER_END_TOKEN}, {DEFAULT_POINTER_START_TOKEN}{DEFAULT_POINTER_PAD_TOKEN}{DEFAULT_POINTER_END_TOKEN}"
-        text = re.sub(pattern, target_text, text)
+    # Find the JSON block in the text
+    json_match = re.search(r'```json\s*({.*?})\s*```', text, re.DOTALL)
+    
+    if not json_match:
+        # No JSON found, return text as-is
+        return text, coordinates
+    
+    try:
+        json_data = json.loads(json_match.group(1))
+        
+        # Extract coordinates based on the JSON structure
+        if "points" in json_data:
+            # For keypoint interactions
+            for point in json_data["points"]:
+                if isinstance(point, list) and len(point) >= 2:
+                    x = adjust_coord(float(point[0]))
+                    y = adjust_coord(float(point[1]))
+                    coordinates.append((x, y))
+                    
+        elif "bounding_box" in json_data:
+            # For bounding box interactions
+            bbox = json_data["bounding_box"]
+            if isinstance(bbox, list) and len(bbox) == 4:
+                # Extract both corners of the bounding box
+                x1 = adjust_coord(float(bbox[0]))
+                y1 = adjust_coord(float(bbox[1]))
+                x2 = adjust_coord(float(bbox[2]))
+                y2 = adjust_coord(float(bbox[3]))
+                coordinates.append((x1, y1))
+                coordinates.append((x2, y2))
+        
+        # Now insert pointer tokens
+        # We'll insert them right after the JSON block to maintain locality
+        if coordinates:
+            # Generate the appropriate number of pointer token sequences
+            if len(coordinates) == 1:
+                pointer_sequence = f"{DEFAULT_POINTER_START_TOKEN}{DEFAULT_POINTER_PAD_TOKEN}{DEFAULT_POINTER_END_TOKEN}"
+            else:
+                # For multiple coordinates (like bounding boxes)
+                pointer_sequence = f"{DEFAULT_POINTER_START_TOKEN}{DEFAULT_POINTER_PAD_TOKEN}{DEFAULT_POINTER_END_TOKEN}, {DEFAULT_POINTER_START_TOKEN}{DEFAULT_POINTER_PAD_TOKEN}{DEFAULT_POINTER_END_TOKEN}"
+            
+            # Insert the pointer tokens after the JSON block
+            text = text.replace("```\n", f"```\n{pointer_sequence}\n")
+            
+    except json.JSONDecodeError:
+        # If JSON parsing fails, log this but don't crash
+        print("Warning: Could not parse JSON in text for coordinate extraction")
     
     return text, coordinates
 
