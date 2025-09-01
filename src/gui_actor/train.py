@@ -88,6 +88,17 @@ def train_gui_actor_on_fiftyone(
         device_map="auto"
     )
     
+    diff_marker_id = tokenizer.convert_tokens_to_ids("<|diff_marker|>")
+    model.config.eos_token_id = [diff_marker_id]
+    tokenizer.eos_token = "<|diff_marker|>"
+    tokenizer.eos_token_id = diff_marker_id
+    
+    # Also update generation config if it exists
+    if hasattr(model, 'generation_config'):
+        model.generation_config.eos_token_id = [diff_marker_id]
+
+    print(f"Set EOS token to <|diff_marker|> (ID: {diff_marker_id}) for training and inference")
+
     # Set loss weights to match original recipe
     model.reset_loss_weights(pointer_loss_weight=pointer_loss_weight, lm_loss_weight=lm_loss_weight)
     model.config.use_cache = False
