@@ -82,7 +82,7 @@ def add_message_payload_to_dataset(dataset):
                     
                     # Create natural language response with embedded JSON
                     # Note: coordinates in text match those used for pointer tokens
-                    response_text = f"""I can {action} the {element_info if isinstance(element_info, str) else 'element'} at x={round(x, 4)}, y={round(y, 4)} to complete this task. Here is the valid JSON response: ```json {json.dumps(json_response)}```"""
+                    response_text = f"""I will {action} the {element_info if isinstance(element_info, str) else 'element'}. ```json {json.dumps(json_response)}```"""
                     
                     # Create the full conversation format
                     messages = [
@@ -158,7 +158,7 @@ def add_message_payload_to_dataset(dataset):
                     
                     # Create natural language response with embedded JSON
                     # Note: from_coord/to_coord format matches training patterns
-                    response_text = f"""I can {action} the {element_info if isinstance(element_info, str) else 'region'} from_coord=[{x_min}, {y_min}] to_coord=[{x_max}, {y_max}] to complete this task. Here is the valid JSON response: ```json {json.dumps(json_response)}```"""
+                    response_text = f"""I will {action} the {element_info if isinstance(element_info, str) else 'element'}. ```json {json.dumps(json_response)}```"""
                     
                     # Create the full conversation format
                     messages = [
