@@ -1,9 +1,11 @@
 import argparse
 import os
 import sys
+import json
 import fiftyone as fo
 from fiftyone.utils.torch import GetItem
 import fiftyone.utils.random as four
+
 
 KP_SYSTEM_MESSAGE = """You are a GUI Agent specialized in interacting with the FiftyOne application. Given a screenshot of the current FiftyOne GUI and a human instruction, your task is to locate the screen element that corresponds to the instruction.
 
@@ -25,36 +27,67 @@ Your response must be a valid JSON wrapped exactly this format:
 {{"element_info": {element_info}, "label": "{label}", "bounding_box": {bounding_box}, "custom_metadata": {custom_metadata}}}
 ```"""
 
-
 def add_message_payload_to_dataset(dataset):
     """
-    Add message payload to all keypoints and detections, where the label
-    represents the ACTION to be performed (click, type, select, etc.).
+    Add message payloads to FiftyOne dataset annotations for GUI-Actor training.
     
-    Converts bounding boxes from [x, y, width, height] to [x_min, y_min, x_max, y_max] for bbox_gt.
+    This function processes both keypoint (single-point) and detection (bounding box)
+    annotations, converting them into conversation format for vision-language model training.
+    Each annotation gets a complete conversation with system prompt, user query, and 
+    assistant response containing both natural language and structured JSON.
+    
+    Args:
+        dataset: FiftyOne dataset with 'keypoints' and/or 'detections' fields
+        
+    Modifies:
+        Adds 'message_payload' field to each annotation containing the formatted
+        conversation for training
     """
     
     for sample in dataset.iter_samples(autosave=True, progress=True):
         filepath = sample["filepath"]
         
-        # Process keypoints (point-based interactions)
+        # Process keypoints (point-based interactions like clicks)
         if sample.keypoints:
             for kp in sample.keypoints.keypoints:
-                # Extract keypoint attributes
+                # Extract keypoint attributes with safe defaults
                 task_desc = getattr(kp, 'task_description', '')
-                element_info = getattr(kp, 'element_info', {})
-                action = getattr(kp, 'label', '')
+                element_info = getattr(kp, 'element_info', None)
+                action = getattr(kp, 'label', 'click')  # Default action is click
                 points = getattr(kp, 'points', [])
-                custom_metadata = getattr(kp, 'custom_metadata', {})
+                custom_metadata = getattr(kp, 'custom_metadata', None)
                 
-                # Extract coordinates for pointer loss
+                # Ensure element_info is a proper dict or string
+                if element_info is None or element_info == {} or element_info == '':
+                    element_info = "ui_element"  # Simple string fallback
+                elif isinstance(element_info, dict) and not element_info:
+                    element_info = "ui_element"  # Empty dict -> string
+                elif not isinstance(element_info, (dict, str)):
+                    element_info = str(element_info)  # Convert to string if weird type
+                
+                # Ensure custom_metadata is a proper dict
+                if custom_metadata is None or custom_metadata == {} or custom_metadata == '':
+                    custom_metadata = {"type": "point_interaction"}
+                elif not isinstance(custom_metadata, dict):
+                    custom_metadata = {"value": str(custom_metadata)}
+                
+                # Only process if we have valid coordinates
                 if points and len(points) > 0:
                     x, y = points[0]
                     
-                    # Create response with action and location
-                    response_text = f"""I can {action} the {element_info} at x={x}, y={y} to complete this task. Here is the valid JSON response: ```json {{"action": "{action}", "element_info": {element_info}, "points": {points}, "custom_metadata": {custom_metadata}}}```"""
+                    # Build the JSON response object
+                    json_response = {
+                        "action": action,
+                        "element_info": element_info,
+                        "points": [[round(x, 4), round(y, 4)]],  # Round for cleaner output
+                        "custom_metadata": custom_metadata
+                    }
                     
-                    # Create message payload in the correct format
+                    # Create natural language response with embedded JSON
+                    # Note: coordinates in text match those used for pointer tokens
+                    response_text = f"""I can {action} the {element_info if isinstance(element_info, str) else 'element'} at x={round(x, 4)}, y={round(y, 4)} to complete this task. Here is the valid JSON response: ```json {json.dumps(json_response)}```"""
+                    
+                    # Create the full conversation format
                     messages = [
                         {
                             "role": "system",
@@ -76,37 +109,61 @@ def add_message_payload_to_dataset(dataset):
                             ],
                             "recipient": "os",
                             "end_turn": True,
-                            "point_gt": points[0] if points else None
+                            "point_gt": points[0] if points else None  # Ground truth for pointer loss
                         }
                     ]
                     
                     kp.message_payload = messages
         
-        # Process detections (region-based interactions)
+        # Process detections (bounding box interactions like drag, select)
         if sample.detections:
             for det in sample.detections.detections:
-                # Extract detection attributes
+                # Extract detection attributes with safe defaults
                 task_desc = getattr(det, 'task_description', '')
-                element_info = getattr(det, 'element_info', '')
-                action = getattr(det, 'label', '')
+                element_info = getattr(det, 'element_info', None)
+                action = getattr(det, 'label', 'select')  # Default action is select
                 bounding_box = getattr(det, 'bounding_box', [])
-                custom_metadata = getattr(det, 'custom_metadata', {})
+                custom_metadata = getattr(det, 'custom_metadata', None)
                 
+                # Ensure element_info is a proper dict or string
+                if element_info is None or element_info == {} or element_info == '':
+                    element_info = "ui_region"  # Simple string fallback
+                elif isinstance(element_info, dict) and not element_info:
+                    element_info = "ui_region"  # Empty dict -> string
+                elif not isinstance(element_info, (dict, str)):
+                    element_info = str(element_info)  # Convert to string if weird type
+                
+                # Ensure custom_metadata is a proper dict
+                if custom_metadata is None or custom_metadata == {} or custom_metadata == '':
+                    custom_metadata = {"type": "bbox_interaction"}
+                elif not isinstance(custom_metadata, dict):
+                    custom_metadata = {"value": str(custom_metadata)}
+                
+                # Only process if we have valid bounding box
                 if bounding_box and len(bounding_box) == 4:
-                    # Extract bounding box coordinates [x, y, width, height]
+                    # FiftyOne format: [x, y, width, height] in relative coords [0,1]
                     x, y, width, height = bounding_box
                     
-                    # Convert to [x_min, y_min, x_max, y_max] format for bbox_gt
-                    x_min = x
-                    y_min = y
-                    x_max = x + width
-                    y_max = y + height
+                    # Convert to [x_min, y_min, x_max, y_max] for consistency
+                    x_min = round(x, 4)
+                    y_min = round(y, 4)
+                    x_max = round(x + width, 4)
+                    y_max = round(y + height, 4)
                     bbox_gt_format = [x_min, y_min, x_max, y_max]
                     
-                    # Create response with action and bounding box information
-                    response_text = f"""I can {action} the {element_info} from_coord=[{x_min}, {y_min}] to_coord=[{x_max}, {y_max}] to complete this task. Here is the valid JSON response: ```json {{"action": "{action}", "element_info": {element_info}, "bounding_box": {bbox_gt_format}, "custom_metadata": {custom_metadata}}}```"""
+                    # Build the JSON response object
+                    json_response = {
+                        "action": action,
+                        "element_info": element_info,
+                        "bounding_box": bbox_gt_format,
+                        "custom_metadata": custom_metadata
+                    }
                     
-                    # Create message payload in the correct format
+                    # Create natural language response with embedded JSON
+                    # Note: from_coord/to_coord format matches training patterns
+                    response_text = f"""I can {action} the {element_info if isinstance(element_info, str) else 'region'} from_coord=[{x_min}, {y_min}] to_coord=[{x_max}, {y_max}] to complete this task. Here is the valid JSON response: ```json {json.dumps(json_response)}```"""
+                    
+                    # Create the full conversation format
                     messages = [
                         {
                             "role": "system",
@@ -128,7 +185,7 @@ def add_message_payload_to_dataset(dataset):
                             ],
                             "recipient": "os",
                             "end_turn": True,
-                            "bbox_gt": bbox_gt_format
+                            "bbox_gt": bbox_gt_format  # Ground truth for pointer loss
                         }
                     ]
                     
