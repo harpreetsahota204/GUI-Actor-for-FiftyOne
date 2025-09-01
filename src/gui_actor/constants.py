@@ -13,6 +13,14 @@ ACTION_PATTENS_JSON = [
     r'"y":\s*([\d.]+)',
 ]
 
+ADDITIONAL_SPECIAL_TOKENS = [
+    "<|recipient|>",
+    "<|diff_marker|>",
+    DEFAULT_POINTER_START_TOKEN,
+    DEFAULT_POINTER_END_TOKEN,
+    DEFAULT_POINTER_PAD_TOKEN,
+]
+
 # Consistent ending token
 RESPONSE_END_TOKEN = "<|diff_marker|>"
 
