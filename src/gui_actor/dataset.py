@@ -14,7 +14,7 @@ try:
         DEFAULT_POINTER_START_TOKEN,  # Special token marking start of pointer sequence
         DEFAULT_POINTER_PAD_TOKEN,  # Special token for padding pointer sequences
         DEFAULT_POINTER_END_TOKEN,  # Special token marking end of pointer sequence
-        ACTION_PATTENS_XY  # Regex patterns for extracting coordinate pairs
+        ACTION_PATTENS_JSON  # Regex patterns for extracting coordinate pairs
     )
 except ImportError:
     # Fall back to relative import (when running locally)
