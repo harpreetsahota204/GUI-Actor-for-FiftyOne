@@ -285,6 +285,9 @@ def train_gui_actor_on_fiftyone(
         eval_dataset=val_dataset,
         data_collator=collator,
     )
+
+    trainer.create_optimizer = trainer.create_optimizer_with_different_learning_rates
+
     
     # Train
     trainer.train()

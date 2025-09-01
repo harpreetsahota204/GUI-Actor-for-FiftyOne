@@ -88,9 +88,13 @@ class AGUVISTrainer(Trainer):
 
             return wrapper
 
-        # Apply EOS token modification to save methods
-        self._save = modify_eos_token(original_save)
-        self.save_model = modify_eos_token(original_save_model)
+        # Don't modify EOS tokens - use consistent tokens throughout
+        # self._save = modify_eos_token(original_save) 
+        # self.save_model = modify_eos_token(original_save_model)
+
+        # Just use the original save methods directly
+        self._save = original_save
+        self.save_model = original_save_model
     
 
 
