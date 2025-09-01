@@ -88,6 +88,15 @@ def train_gui_actor_on_fiftyone(
         device_map="auto"
     )
     
+    # Load processor and tokenizer first (before using tokenizer)
+    processor = AutoProcessor.from_pretrained(model_name)
+    tokenizer = processor.tokenizer
+    
+    # Ensure special tokens are set
+    tokenizer.add_special_tokens({"additional_special_tokens": ADDITIONAL_SPECIAL_TOKENS})
+    model.resize_token_embeddings(len(tokenizer))
+    
+    # Now set up diff_marker as EOS token (after tokenizer is defined)
     diff_marker_id = tokenizer.convert_tokens_to_ids("<|diff_marker|>")
     model.config.eos_token_id = [diff_marker_id]
     tokenizer.eos_token = "<|diff_marker|>"
@@ -107,14 +116,6 @@ def train_gui_actor_on_fiftyone(
     model.config.max_position_embeddings = model_max_length
     if hasattr(model.config, 'max_pixels'):
         model.config.max_pixels = max_pixels
-    
-    # Load processor
-    processor = AutoProcessor.from_pretrained(model_name)
-    tokenizer = processor.tokenizer
-    
-    # Ensure special tokens are set
-    tokenizer.add_special_tokens({"additional_special_tokens": ADDITIONAL_SPECIAL_TOKENS})
-    model.resize_token_embeddings(len(tokenizer))
     
     # Apply single-app mode overrides for aggressive fine-tuning
     if single_app_mode:
