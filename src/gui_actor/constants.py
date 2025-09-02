@@ -25,6 +25,6 @@ ADDITIONAL_SPECIAL_TOKENS = [
 RESPONSE_END_TOKEN = "<|diff_marker|>"
 
 # Simplified template
-assistant_template = """{% for message in messages %}<|im_start|>{{ message['role'] }}{% if 'recipient' in message %}<|recipient|>{{ message['recipient'] }}{% endif %}
+chat_template = """{% for message in messages %}<|im_start|>{{ message['role'] }}{% if 'recipient' in message %}<|recipient|>{{ message['recipient'] }}{% endif %}
 {{ message['content'][0]['text'] }}<|diff_marker|>
 {% endfor %}"""
