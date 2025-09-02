@@ -27,19 +27,13 @@ except ImportError:
     )
 
 def reformat_coordinates(text):
-    """
-    Extract coordinates from JSON structure and insert pointer tokens.
-    
-    This approach assumes coordinates only appear in JSON, not in natural language.
-    The pointer tokens get inserted to mark where visual grounding should occur.
-    """
+    """Extract coordinates from JSON and replace them with pointer tokens."""
     import json
     import re
     
     epsilon = 0.001
     
     def adjust_coord(c):
-        """Ensure coordinates stay within valid [0,1] bounds"""
         if abs(c) < epsilon:
             return epsilon
         elif abs(c - 1) < epsilon:
@@ -52,48 +46,52 @@ def reformat_coordinates(text):
     json_match = re.search(r'```json\s*({.*?})\s*```', text, re.DOTALL)
     
     if not json_match:
-        # No JSON found, return text as-is
         return text, coordinates
     
     try:
-        json_data = json.loads(json_match.group(1))
+        json_str = json_match.group(1)
+        json_data = json.loads(json_str)
         
-        # Extract coordinates based on the JSON structure
+        # Extract coordinates and prepare replacement
         if "points" in json_data:
             # For keypoint interactions
-            for point in json_data["points"]:
+            points = json_data["points"]
+            for point in points:
                 if isinstance(point, list) and len(point) >= 2:
                     x = adjust_coord(float(point[0]))
                     y = adjust_coord(float(point[1]))
                     coordinates.append((x, y))
+            
+            if coordinates:
+                # Replace the coordinate array with pointer tokens
+                pointer_sequence = f"<|pointer_start|><|pointer_pad|><|pointer_end|>"
+                
+                # Replace the points array value with pointer tokens
+                # We need to be careful to maintain valid JSON structure
+                pattern = r'"points":\s*\[\[[^\]]+\]\]'
+                replacement = f'"points": {pointer_sequence}'
+                text = re.sub(pattern, replacement, text)
                     
         elif "bounding_box" in json_data:
             # For bounding box interactions
             bbox = json_data["bounding_box"]
             if isinstance(bbox, list) and len(bbox) == 4:
-                # Extract both corners of the bounding box
                 x1 = adjust_coord(float(bbox[0]))
                 y1 = adjust_coord(float(bbox[1]))
                 x2 = adjust_coord(float(bbox[2]))
                 y2 = adjust_coord(float(bbox[3]))
                 coordinates.append((x1, y1))
                 coordinates.append((x2, y2))
-        
-        # Now insert pointer tokens
-        # We'll insert them right after the JSON block to maintain locality
-        if coordinates:
-            # Generate the appropriate number of pointer token sequences
-            if len(coordinates) == 1:
-                pointer_sequence = f"{DEFAULT_POINTER_START_TOKEN}{DEFAULT_POINTER_PAD_TOKEN}{DEFAULT_POINTER_END_TOKEN}"
-            else:
-                # For multiple coordinates (like bounding boxes)
-                pointer_sequence = f"{DEFAULT_POINTER_START_TOKEN}{DEFAULT_POINTER_PAD_TOKEN}{DEFAULT_POINTER_END_TOKEN}, {DEFAULT_POINTER_START_TOKEN}{DEFAULT_POINTER_PAD_TOKEN}{DEFAULT_POINTER_END_TOKEN}"
-            
-            # Insert the pointer tokens after the JSON block
-            text = text.replace("```\n", f"```\n{pointer_sequence}\n")
+                
+                # For bbox, we need two pointer sequences
+                pointer_sequence = f"<|pointer_start|><|pointer_pad|><|pointer_end|>, <|pointer_start|><|pointer_pad|><|pointer_end|>"
+                
+                # Replace the bbox array with pointer tokens
+                pattern = r'"bounding_box":\s*\[[^\]]+\]'
+                replacement = f'"bounding_box": {pointer_sequence}'
+                text = re.sub(pattern, replacement, text)
             
     except json.JSONDecodeError:
-        # If JSON parsing fails, log this but don't crash
         print("Warning: Could not parse JSON in text for coordinate extraction")
     
     return text, coordinates
