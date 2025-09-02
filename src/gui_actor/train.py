@@ -47,9 +47,9 @@ def train_gui_actor_on_fiftyone(
     num_train_epochs=3,
     per_device_train_batch_size=1,
     per_device_eval_batch_size=1,  # Reduced to prevent OOM during eval
-    learning_rate=2e-5,
-    save_steps=500,
-    logging_steps=50,
+    learning_rate=3e-5,
+    save_steps=250,
+    logging_steps=10,
     gradient_accumulation_steps=16,  # Increased for better memory efficiency
     warmup_ratio=0.1,
     weight_decay=0.01,
